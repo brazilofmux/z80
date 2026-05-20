@@ -102,10 +102,12 @@ int main(int argc, char **argv) {
 
     if (root_to_use) {
         cpm_set_a_root(root_to_use);
-        /* Also chdir so relative paths feel natural */
+        /* chdir so the host directory is the root of A: */
         if (chdir(root_to_use) != 0) {
             fprintf(stderr, "Warning: could not chdir into '%s'\n", root_to_use);
         }
+        /* Clear a_root — we rely on CWD now. Prevents double-prefixing in make_host_path. */
+        cpm_set_a_root(NULL);
     }
 
     /* If no explicit program was given but we have a disk root, try to find one */
@@ -163,8 +165,8 @@ int main(int argc, char **argv) {
             /* Clean CP/M exit via BDOS 0 / WBOOT / BIOS WBOOT */
             break;
         }
-        if (cpu.insn_count > 50000000ULL) {
-            fprintf(stderr, "Safety limit (50M insns) reached — possible infinite loop\n");
+        if (cpu.insn_count > 500000000ULL) {
+            fprintf(stderr, "Safety limit (500M insns) reached — possible infinite loop\n");
             break;
         }
     }

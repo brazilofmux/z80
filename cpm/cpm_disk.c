@@ -169,7 +169,12 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     FILE *fp;
 
     fcb_to_host_name(fcb, host_name, sizeof(host_name));
-    make_host_path(host_name, host_name, sizeof(host_name));
+    {
+        char full[PATH_MAX];
+        make_host_path(host_name, full, sizeof(full));
+        strncpy(host_name, full, sizeof(host_name));
+        host_name[sizeof(host_name)-1] = 0;
+    }
 
     fp = fopen(host_name, "rb");
     if (!fp) {
@@ -386,7 +391,12 @@ int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     FILE *fp;
 
     fcb_to_host_name(fcb, host_name, sizeof(host_name));
-    make_host_path(host_name, host_name, sizeof(host_name));
+    {
+        char full[PATH_MAX];
+        make_host_path(host_name, full, sizeof(full));
+        strncpy(host_name, full, sizeof(host_name));
+        host_name[sizeof(host_name)-1] = 0;
+    }
 
     /* Create/truncate the file */
     fp = fopen(host_name, "wb");

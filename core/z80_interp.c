@@ -220,6 +220,10 @@ int z80_step(z80_cpu_t *cpu) {
         write_reg8(cpu, 6, dec.imm8, &dec);
         break;
 
+    case Z80_OP_LD_HL_N:   /* LD (HL), n */
+        write_reg8(cpu, 6, dec.imm8, &dec);
+        break;
+
     case Z80_OP_LD_DE_A:
         cpu->mem[cpu->de & 0xFFFF] = cpu->a;
         break;
@@ -528,6 +532,48 @@ int z80_step(z80_cpu_t *cpu) {
             uint16_t t = cpu->af; cpu->af = cpu->af_; cpu->af_ = t;
         }
         break;
+
+    /* --- Accumulator rotates (0x07/0x0F/0x17/0x1F) --- */
+    case Z80_OP_RLCA: {
+        uint8_t a = cpu->a;
+        uint8_t c = (a & 0x80) ? 1 : 0;
+        a = (a << 1) | c;
+        cpu->a = a;
+        cpu->f = (cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV)) |
+                 (c ? Z80_FLAG_C : 0) |
+                 (a & (Z80_FLAG_3 | Z80_FLAG_5));
+        break;
+    }
+    case Z80_OP_RRCA: {
+        uint8_t a = cpu->a;
+        uint8_t c = a & 1;
+        a = (a >> 1) | (c << 7);
+        cpu->a = a;
+        cpu->f = (cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV)) |
+                 (c ? Z80_FLAG_C : 0) |
+                 (a & (Z80_FLAG_3 | Z80_FLAG_5));
+        break;
+    }
+    case Z80_OP_RLA: {
+        uint8_t a = cpu->a;
+        uint8_t c = (a & 0x80) ? 1 : 0;
+        a = (a << 1) | ((cpu->f & Z80_FLAG_C) ? 1 : 0);
+        cpu->a = a;
+        cpu->f = (cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV)) |
+                 (c ? Z80_FLAG_C : 0) |
+                 (a & (Z80_FLAG_3 | Z80_FLAG_5));
+        break;
+    }
+    case Z80_OP_RRA: {
+        uint8_t a = cpu->a;
+        uint8_t c = a & 1;
+        a = (a >> 1) | ((cpu->f & Z80_FLAG_C) ? 0x80 : 0);
+        cpu->a = a;
+        cpu->f = (cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV)) |
+                 (c ? Z80_FLAG_C : 0) |
+                 (a & (Z80_FLAG_3 | Z80_FLAG_5));
+        break;
+    }
 
     case Z80_OP_EXX:
         {

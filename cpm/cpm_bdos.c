@@ -42,8 +42,28 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
         cpu->a = cpm_conin();
         return 1;
 
+    case 6:             /* 6 - Direct Console I/O (very common) */
+        if (cpu->de == 0x00FF) {
+            /* Read char if available (non-blocking) */
+            cpu->a = cpm_constat() ? cpm_conin() : 0;
+        } else {
+            /* Write char in E */
+            cpm_conout(cpu->e);
+            cpu->a = cpu->e;   /* some programs expect echo in A */
+        }
+        return 1;
+
     case CPM_F_VERSION: /* 12 */
         cpu->hl = 0x0022; /* CP/M 2.2 */
+        return 1;
+
+    case CPM_F_RETDSK:  /* 25 - Return Current Disk */
+        cpu->a = 0;     /* We only support drive A: (0) for now */
+        return 1;
+
+    case CPM_F_SELDSK:  /* 14 - Select Disk */
+        /* For now we only have drive A: (0). Accept the call. */
+        cpu->a = 0;
         return 1;
 
     case CPM_F_SETDMA:   /* 26 */

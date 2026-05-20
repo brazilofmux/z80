@@ -191,6 +191,12 @@ typedef enum {
     Z80_OP_LDD,
     Z80_OP_CB,          /* CB prefix group: rotates, shifts, BIT/RES/SET */
 
+    /* Simple accumulator rotates (not under CB) */
+    Z80_OP_RLCA,
+    Z80_OP_RRCA,
+    Z80_OP_RLA,
+    Z80_OP_RRA,
+
     /* IX/IY indexed memory forms (reused where possible) */
     Z80_OP_LD_A_HL_ind,
     Z80_OP_LD_HL_A_ind,
