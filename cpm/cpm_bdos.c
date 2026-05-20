@@ -58,6 +58,12 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
     case CPM_F_READ:     /* 20 - read sequential */
         return cpm_bdos_read_sequential(cpu, cpu->de);
 
+    case CPM_F_SFIRST:   /* 17 - search first */
+        return cpm_bdos_search_first(cpu, cpu->de);
+
+    case CPM_F_SNEXT:    /* 18 - search next */
+        return cpm_bdos_search_next(cpu);
+
     default:
         fprintf(stderr, "\n[BDOS] unimplemented function %d (C=%d)  DE=%04X\n",
                 func, func, cpu->de);

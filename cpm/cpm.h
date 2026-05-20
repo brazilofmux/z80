@@ -118,6 +118,8 @@ int  cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr);
 int  cpm_bdos_close_file(z80_cpu_t *cpu, uint16_t fcb_addr);
 int  cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr);
 int  cpm_bdos_set_dma(z80_cpu_t *cpu);  /* uses DE */
+int  cpm_bdos_search_first(z80_cpu_t *cpu, uint16_t fcb_addr);
+int  cpm_bdos_search_next(z80_cpu_t *cpu);
 
 /* Load a .COM file at 0x0100, set up the CP/M memory image, and
  * prepare the CPU to run it (PC=0x0100, stack high, C=0 for CCP compat).
