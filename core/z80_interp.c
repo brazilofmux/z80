@@ -458,14 +458,17 @@ int z80_step(z80_cpu_t *cpu) {
             cpu->sp = (cpu->sp + 2) & 0xFFFF;
         }
 
-        /* BIOS jump table trampoline trap (very important for real programs) */
-        if (cpu->pc >= (CPM_BIOS_BASE + 0x100) &&
-            cpu->pc <  (CPM_BIOS_BASE + 0x200)) {
+        /* BIOS vector table trap — catches both direct jumps to the
+         * vectors at BIOS_BASE and jumps to the call-gate area.
+         * This is required for the classic "LD HL,(0001); ADD HL,DE; JP (HL)" pattern.
+         */
+        if (cpu->pc >= CPM_BIOS_BASE &&
+            cpu->pc <  CPM_BIOS_BASE + 0x80) {          /* generous range covering vectors + gates */
             int cont = cpm_bios_dispatch(cpu);
             if (!cont) {
-                return 1;   /* clean exit (WBOOT etc.) */
+                return 1;
             }
-            /* Simulate RET from BIOS call */
+            /* Simulate return from BIOS call (most BIOS functions are expected to return) */
             cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
             cpu->sp = (cpu->sp + 2) & 0xFFFF;
         }

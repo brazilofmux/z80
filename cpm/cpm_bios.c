@@ -17,83 +17,97 @@
 #include <sys/time.h>
 
 /* Forward decls for console helpers (we can share logic with BDOS later) */
-static int  bios_const(z80_cpu_t *cpu);
-static int  bios_conin(z80_cpu_t *cpu);
-static void bios_conout(z80_cpu_t *cpu, uint8_t ch);
+/* (BIOS wrappers removed — we now call the unified cpm_* functions directly) */
 
-/* Install the standard CP/M BIOS jump table + trampolines.
- * Each entry is a JP to CPM_BIOS_BASE + 0x100 + (func * 4)
- * We use a small trampoline area so the interpreter can easily detect
- * which function was called by looking at PC.
+/* Install the standard CP/M 2.2 BIOS jump table.
+ *
+ * Layout at BIOS_BASE:
+ *    +0  JP BOOT
+ *    +3  JP WBOOT
+ *    +6  JP CONST
+ *    ...
+ *
+ * The targets are inside the BIOS area itself. The interpreter
+ * special-cases any PC that lands inside the vector table range
+ * and dispatches based on the offset.
  */
 void cpm_install_bios(z80_cpu_t *cpu) {
     if (!cpu->mem) return;
 
     uint16_t base = CPM_BIOS_BASE;
-    uint16_t tramp = base + 0x100;   /* trampoline area */
 
-    /* Write the 17 jump vectors (standard layout) */
-    for (int i = 0; i < CPM_BIOS_COUNT; i++) {
-        uint16_t addr = base + i * 3;
-        cpu->mem[addr]     = 0xC3;                    /* JP */
-        cpu->mem[addr + 1] = (tramp + i * 4) & 0xFF;
-        cpu->mem[addr + 2] = (tramp + i * 4) >> 8;
-    }
-
-    /* Write tiny trampolines:
-     *   LD A, func
-     *   JP   trampoline_dispatch
-     *
-     * The interpreter will detect PC in the trampoline range and
-     * treat the byte after the LD A as the function number.
+    /* Write the 17 standard 3-byte JP vectors.
+     * Each JP points to a unique address inside the BIOS area
+     * (base + 0x30 + i*3). The interpreter will catch execution
+     * in this range and map it back to the function index.
      */
     for (int i = 0; i < CPM_BIOS_COUNT; i++) {
-        uint16_t t = tramp + i * 4;
-        cpu->mem[t]     = 0x3E;          /* LD A, imm */
-        cpu->mem[t + 1] = i;             /* function number */
-        cpu->mem[t + 2] = 0xC3;          /* JP */
-        cpu->mem[t + 3] = (tramp + 0x100) & 0xFF; /* common dispatcher */
-        cpu->mem[t + 4] = (tramp + 0x100) >> 8;   /* (we'll reuse the same page) */
+        uint16_t vec   = base + i * 3;
+        uint16_t dest  = base + 0x30 + i * 3;   /* unique destination per function */
+
+        cpu->mem[vec]     = 0xC3;               /* JP */
+        cpu->mem[vec + 1] = dest & 0xFF;
+        cpu->mem[vec + 2] = dest >> 8;
     }
 
-    /* Common dispatcher stub at tramp + 0x100
-     * We don't actually execute it — the interpreter intercepts before.
-     */
-    /* Mark the BIOS area so we know it's installed */
-    cpu->mem[base + 0x50] = 'B';
-    cpu->mem[base + 0x51] = 'I';
-    cpu->mem[base + 0x52] = 'O';
-    cpu->mem[base + 0x53] = 'S';
+    /* Also write the classic warm-boot vector at 0001 (points to WBOOT) */
+    cpu->mem[0x0001] = (base + 3) & 0xFF;
+    cpu->mem[0x0002] = (base + 3) >> 8;
+
+    /* Mark the BIOS area */
+    cpu->mem[base + 0x00] = 'B';
+    cpu->mem[base + 0x01] = 'I';
+    cpu->mem[base + 0x02] = 'O';
+    cpu->mem[base + 0x03] = 'S';
 }
 
-/* Called from the interpreter when PC is in the BIOS trampoline area.
- * The byte at PC+1 after the LD A,imm tells us the function.
+/* Called from the interpreter when execution reaches a BIOS vector
+ * (either by CALL/JP through the table at BIOS_BASE or by calculating
+ * the address from (0001) and jumping).
+ *
+ * We detect the call by PC being inside the vector table or the
+ * "call gate" area (base + 0x30 .. base + 0x30 + 0x33).
  */
 int cpm_bios_dispatch(z80_cpu_t *cpu) {
-    /* The trampoline puts the function number in A right before the JP */
-    uint8_t func = cpu->a;
+    uint16_t base = CPM_BIOS_BASE;
+    uint16_t pc   = cpu->pc;
+
+    int func = -1;
+
+    /* Case 1: PC is directly at one of the vector slots (base + n*3) */
+    if (pc >= base && pc < base + CPM_BIOS_COUNT * 3) {
+        func = (pc - base) / 3;
+    }
+    /* Case 2: PC is in the call-gate area we pointed the vectors at */
+    else if (pc >= base + 0x30 && pc < base + 0x30 + CPM_BIOS_COUNT * 3) {
+        func = (pc - (base + 0x30)) / 3;
+    }
+
+    if (func < 0 || func >= CPM_BIOS_COUNT) {
+        /* Unexpected entry — treat as no-op for now */
+        return 1;
+    }
 
     switch (func) {
     case BIOS_WBOOT:
     case BIOS_BOOT:
-        return 0;   /* terminate like BDOS 0 */
+        return 0;                       /* clean termination */
 
     case BIOS_CONST:
-        cpu->a = bios_const(cpu) ? 0xFF : 0;
+        cpu->a = cpm_constat();         /* already returns 0 or 0xFF */
         return 1;
 
     case BIOS_CONIN:
-        cpu->a = bios_conin(cpu);
+        cpu->a = cpm_conin();
         return 1;
 
     case BIOS_CONOUT:
-        /* Character is in C for many real BIOS implementations */
-        bios_conout(cpu, cpu->c);
+        /* Many real BIOSes expect the char in C when the vector is called */
+        cpm_conout(cpu->c);
         return 1;
 
     default:
-        /* For now, silently ignore disk/others — real programs will
-         * hit this and we can add them as needed. */
+        /* Stub for disk, list, etc. — return success so programs continue */
         return 1;
     }
 }
@@ -137,17 +151,4 @@ uint8_t cpm_constat(void) {
 
 /* --- BIOS wrappers (these are what the BIOS dispatch calls) --- */
 
-static int bios_const(z80_cpu_t *cpu) {
-    (void)cpu;
-    return cpm_constat() == 0xFF ? 1 : 0;
-}
-
-static int bios_conin(z80_cpu_t *cpu) {
-    (void)cpu;
-    return cpm_conin();
-}
-
-static void bios_conout(z80_cpu_t *cpu, uint8_t ch) {
-    (void)cpu;
-    cpm_conout(ch);
-}
+/* BIOS entry points now call the unified cpm_* functions directly in the dispatch */
