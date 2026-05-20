@@ -64,6 +64,12 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
     case CPM_F_SNEXT:    /* 18 - search next */
         return cpm_bdos_search_next(cpu);
 
+    case CPM_F_MAKE:     /* 22 - create file */
+        return cpm_bdos_make_file(cpu, cpu->de);
+
+    case CPM_F_WRITE:    /* 21 - write sequential */
+        return cpm_bdos_write_sequential(cpu, cpu->de);
+
     default:
         fprintf(stderr, "\n[BDOS] unimplemented function %d (C=%d)  DE=%04X\n",
                 func, func, cpu->de);

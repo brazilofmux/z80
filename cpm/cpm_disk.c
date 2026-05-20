@@ -18,7 +18,8 @@
 
 typedef struct {
     FILE   *fp;
-    uint8_t fcb_copy[CPM_FCB_SIZE];   /* snapshot of the FCB when opened */
+    uint8_t fcb_copy[CPM_FCB_SIZE];
+    uint16_t logical_record;   /* current 128-byte record number (extent*128 + CR) */
 } open_file_t;
 
 static uint16_t current_dma = CPM_DEFAULT_DMA;
@@ -75,6 +76,21 @@ static int alloc_file_slot(void)
             return i;
     }
     return -1;
+}
+
+/* Compute host file offset from logical 128-byte record number */
+static long logical_record_to_offset(uint16_t rec)
+{
+    return (long)rec * 128;
+}
+
+/* Get or create a file slot from an FCB (looks at the drive byte we stashed) */
+static int get_file_slot_from_fcb(uint8_t *fcb)
+{
+    int slot = fcb[0] & 0x7F;
+    if (slot >= MAX_OPEN_FILES || open_files[slot].fp == NULL)
+        return -1;
+    return slot;
 }
 
 /* Very simple CP/M 8.3 pattern matcher.
@@ -154,13 +170,13 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     open_files[slot].fp = fp;
     memcpy(open_files[slot].fcb_copy, fcb, CPM_FCB_SIZE);
 
-    /* Success — return 0 in A (and often the file number in some systems) */
+    /* Initialize logical record from FCB */
+    uint8_t extent = fcb[12];
+    uint8_t cr     = fcb[32];
+    open_files[slot].logical_record = ((uint16_t)extent << 7) + cr;
+
     cpu->a = 0;
-    /* Store the slot in the FCB at offset 0 or we can use a simple scheme.
-     * For simplicity many emulators just return 0 and keep an internal map.
-     * We'll store the slot number in the FCB's "drive" byte for our use (hack).
-     */
-    fcb[0] = (uint8_t)(slot | 0x80);   /* mark as "our" open file */
+    fcb[0] = (uint8_t)(slot | 0x80);
 
     return 1;
 }
@@ -182,22 +198,16 @@ int cpm_bdos_close_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = fcb[0] & 0x7F;
-
-    if (slot >= MAX_OPEN_FILES || !open_files[slot].fp) {
-        cpu->a = 1;   /* read error */
+    int slot = get_file_slot_from_fcb(fcb);
+    if (slot < 0) {
+        cpu->a = 1;
         return 1;
     }
 
     FILE *fp = open_files[slot].fp;
+    uint16_t rec = open_files[slot].logical_record;
 
-    /* CP/M record = 128 bytes.
-     * Extent is at 12, Current Record (CR) at 32.
-     */
-    uint8_t extent = fcb[12];
-    uint8_t cr     = fcb[32];
-
-    long offset = ((long)extent * 128 + cr) * 128;
+    long offset = logical_record_to_offset(rec);
 
     if (fseek(fp, offset, SEEK_SET) != 0) {
         cpu->a = 1;
@@ -206,19 +216,62 @@ int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 
     size_t n = fread(&cpu->mem[current_dma], 1, 128, fp);
     if (n == 0) {
-        cpu->a = 1;   /* EOF */
+        cpu->a = 1; /* EOF */
         return 1;
     }
 
-    /* Update CR / extent for next read (simple version) */
-    cr++;
-    if (cr >= 128) {
-        cr = 0;
-        fcb[12] = extent + 1;
-    }
-    fcb[32] = cr;
+    /* Advance */
+    open_files[slot].logical_record = rec + 1;
 
-    cpu->a = 0;   /* success */
+    /* Update FCB for the caller */
+    fcb[12] = (rec + 1) >> 7;     /* new extent */
+    fcb[32] = (rec + 1) & 0x7F;   /* new CR */
+
+    cpu->a = 0;
+    return 1;
+}
+
+int cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    uint8_t *fcb = &cpu->mem[fcb_addr];
+    int slot = get_file_slot_from_fcb(fcb);
+    if (slot < 0) {
+        cpu->a = 1;
+        return 1;
+    }
+
+    FILE *fp = open_files[slot].fp;
+    uint16_t rec = open_files[slot].logical_record;
+
+    long offset = logical_record_to_offset(rec);
+
+    if (fseek(fp, offset, SEEK_SET) != 0) {
+        cpu->a = 1;
+        return 1;
+    }
+
+    /* Write 128 bytes from DMA. Pad with zeros if we only have partial data (rare). */
+    uint8_t buf[128] = {0};
+    memcpy(buf, &cpu->mem[current_dma], 128);
+
+    size_t n = fwrite(buf, 1, 128, fp);
+    if (n != 128) {
+        cpu->a = 1;
+        return 1;
+    }
+
+    /* Advance and flush */
+    open_files[slot].logical_record = rec + 1;
+    fflush(fp);
+
+    /* Update FCB */
+    fcb[12] = (rec + 1) >> 7;
+    fcb[32] = (rec + 1) & 0x7F;
+
+    /* Update record count in current extent (crude but helpful) */
+    if (fcb[15] < 0x80) fcb[15]++;
+
+    cpu->a = 0;
     return 1;
 }
 
@@ -226,6 +279,43 @@ int cpm_bdos_set_dma(z80_cpu_t *cpu)
 {
     current_dma = cpu->de;
     cpu->a = 0;
+    return 1;
+}
+
+int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    uint8_t *fcb = &cpu->mem[fcb_addr];
+    char host_name[64];
+    FILE *fp;
+
+    fcb_to_host_name(fcb, host_name, sizeof(host_name));
+
+    /* Create/truncate the file */
+    fp = fopen(host_name, "wb");
+    if (!fp) {
+        cpu->a = 0xFF;
+        return 1;
+    }
+
+    int slot = alloc_file_slot();
+    if (slot < 0) {
+        fclose(fp);
+        cpu->a = 0xFF;
+        return 1;
+    }
+
+    open_files[slot].fp = fp;
+    memcpy(open_files[slot].fcb_copy, fcb, CPM_FCB_SIZE);
+    open_files[slot].logical_record = 0;
+
+    /* Zero out extent/CR in the FCB copy for a fresh file */
+    fcb[12] = 0;   /* extent */
+    fcb[15] = 0;   /* record count */
+    fcb[32] = 0;   /* current record */
+
+    cpu->a = 0;
+    fcb[0] = (uint8_t)(slot | 0x80);
+
     return 1;
 }
 

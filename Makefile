@@ -104,6 +104,13 @@ tests/console.com: tools/mkconsole
 tools/mkconsole: tools/mkconsole.c
 	$(CC) -o $@ $<
 
+tests/fileio.com: tools/mkfileio
+	@mkdir -p tests
+	./tools/mkfileio
+
+tools/mkfileio: tools/mkfileio.c
+	$(CC) -o $@ $<
+
 # Quick sanity: does it even compile and say hello?
 smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/console.com
 	@echo "=== Smoke test ==="
