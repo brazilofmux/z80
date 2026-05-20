@@ -81,5 +81,9 @@ int cpm_load_com(z80_cpu_t *cpu, const char *path) {
     /* Make sure the BDOS trampoline is there */
     cpm_install(cpu);
 
+    /* Install a real BIOS jump table — critical for programs that
+     * call the BIOS vectors directly (very common in WordStar, etc.) */
+    cpm_install_bios(cpu);
+
     return 0;
 }

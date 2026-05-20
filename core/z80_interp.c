@@ -457,6 +457,18 @@ int z80_step(z80_cpu_t *cpu) {
             cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
             cpu->sp = (cpu->sp + 2) & 0xFFFF;
         }
+
+        /* BIOS jump table trampoline trap (very important for real programs) */
+        if (cpu->pc >= (CPM_BIOS_BASE + 0x100) &&
+            cpu->pc <  (CPM_BIOS_BASE + 0x200)) {
+            int cont = cpm_bios_dispatch(cpu);
+            if (!cont) {
+                return 1;   /* clean exit (WBOOT etc.) */
+            }
+            /* Simulate RET from BIOS call */
+            cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
+            cpu->sp = (cpu->sp + 2) & 0xFFFF;
+        }
         break;
 
     case Z80_OP_CALL_CC_NN:

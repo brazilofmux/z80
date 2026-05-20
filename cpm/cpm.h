@@ -17,6 +17,12 @@
 #define CPM_BDOS_ENTRY  0x0005
 #define CPM_WBOOT_ENTRY 0x0000
 
+/* BIOS base — chosen so we have a 62K TPA (common for CP/M 2.2 on 64K machines) */
+#define CPM_BIOS_BASE   0xF200
+
+/* Number of BIOS functions in the jump table (classic is 17 for CP/M 2.2) */
+#define CPM_BIOS_COUNT  17
+
 /* BDOS function numbers we care about for the first bring-up */
 enum {
     CPM_F_WBOOT   = 0,   /* System reset */
@@ -57,6 +63,27 @@ enum {
     CPM_F_PRINTSTR = 9,   /* Print $-terminated string at DE */
 };
 
+/* BIOS function numbers (index into the jump table) */
+enum {
+    BIOS_BOOT   = 0,
+    BIOS_WBOOT  = 1,
+    BIOS_CONST  = 2,   /* Console status */
+    BIOS_CONIN  = 3,   /* Console input */
+    BIOS_CONOUT = 4,   /* Console output (char in C) */
+    BIOS_LIST   = 5,
+    BIOS_PUNCH  = 6,
+    BIOS_READER = 7,
+    BIOS_HOME   = 8,
+    BIOS_SELDSK = 9,
+    BIOS_SETTRK = 10,
+    BIOS_SETSEC = 11,
+    BIOS_SETDMA = 12,
+    BIOS_READ   = 13,
+    BIOS_WRITE  = 14,
+    BIOS_LISTST = 15,
+    BIOS_SECTRAN= 16,
+};
+
 /* Install the CP/M environment into the Z80's memory:
  *   - JP WBOOT at 0x0000
  *   - JP BDOS  at 0x0005 (with a recognizable signature so the DBT can
@@ -69,6 +96,10 @@ void cpm_install(z80_cpu_t *cpu);
  * Returns 1 if the program should continue, 0 if it wants to terminate.
  */
 int cpm_bdos_dispatch(z80_cpu_t *cpu);
+
+/* BIOS support */
+void cpm_install_bios(z80_cpu_t *cpu);
+int  cpm_bios_dispatch(z80_cpu_t *cpu);
 
 /* Load a .COM file at 0x0100, set up the CP/M memory image, and
  * prepare the CPU to run it (PC=0x0100, stack high, C=0 for CCP compat).

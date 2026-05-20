@@ -3,10 +3,32 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+static struct termios orig_termios;
+static int term_raw = 0;
 
 static void print_banner(void) {
-    printf("z80-monster — 10 BIPS CP/M Monster (larval stage)\n");
+    printf("z80-monster — 10 BIPS CP/M Monster\n");
     printf("Built on %s %s\n\n", __DATE__, __TIME__);
+}
+
+static void enter_raw_mode(void) {
+    if (term_raw) return;
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    struct termios raw = orig_termios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    term_raw = 1;
+}
+
+static void leave_raw_mode(void) {
+    if (!term_raw) return;
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+    term_raw = 0;
 }
 
 static void usage(const char *prog) {
@@ -50,19 +72,28 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Run the interpreter until it hits a terminating BDOS call */
+    enter_raw_mode();
+    atexit(leave_raw_mode);
+
+    /* Run the interpreter until it hits a terminating condition */
     for (;;) {
+        /* Direct termination conditions (very common in real .COMs) */
+        if (cpu.pc == 0 && cpu.insn_count > 4) {
+            /* Classic CP/M termination: JP 0, RET to 0 on stack, etc. */
+            break;
+        }
+
         int rc = z80_step(&cpu);
         if (rc < 0) {
             fprintf(stderr, "CPU stopped with error at PC=%04X\n", cpu.pc);
             break;
         }
         if (rc > 0) {
-            /* Clean CP/M exit via BDOS 0 / warm boot */
+            /* Clean CP/M exit via BDOS 0 / WBOOT / BIOS WBOOT */
             break;
         }
-        if (cpu.insn_count > 10000000ULL) {
-            fprintf(stderr, "Safety limit (10M insns) reached\n");
+        if (cpu.insn_count > 50000000ULL) {
+            fprintf(stderr, "Safety limit (50M insns) reached — possible infinite loop\n");
             break;
         }
     }

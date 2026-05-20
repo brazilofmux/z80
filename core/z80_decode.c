@@ -150,10 +150,10 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
     }
 
     /* -----------------------------------------------------------------------
-     * Main dispatch table (only for non-prefix-handled instructions).
+     * Main dispatch table.
+     * (Indexed DD/FD cases short-circuit earlier with return.)
      * -------------------------------------------------------------------- */
-    if (!handled_by_prefix) {
-        switch (op) {
+    switch (op) {
         case 0x00: out->type = Z80_OP_NOP; break;
     case 0x01: /* LD BC, nn */
         out->type = Z80_OP_LD_RR_NN; out->reg1 = RR_BC;
@@ -416,20 +416,9 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
         }
     }
 
-    /* DD/FD (IX/IY) handling is incomplete in this first pass.
-     * Real implementation will need a second decode pass for the
-     * "main opcode after DD/FD" and special (IX+d) forms.
-     */
-    if (prefix == 0xDD || prefix == 0xFD) {
-        /* For now we just record that we saw it; execution will be sad. */
-    }
-
-    if (prefix == 0xCB) {
-        /* Bit, rotate, and shift group — huge table.
-         * For the first bring-up we will implement the most common ones
-         * (BIT 7, RES 0-7, SET 0-7, RLC/RRC/RL/RR/SLA etc.) as we hit them.
-         */
-        out->type = Z80_OP_UNKNOWN; /* force interpreter to complain loudly */
+    /* Legacy placeholder cleanup — safe to ignore for now */
+    if (prefix == 0xCB && out->type == 0) {
+        out->type = Z80_OP_CB;
     }
 
     return out->bytes;
