@@ -190,6 +190,25 @@ typedef enum {
     Z80_OP_LDI,
     Z80_OP_LDD,
     Z80_OP_CB,          /* CB prefix group: rotates, shifts, BIT/RES/SET */
+
+    /* IX/IY indexed memory forms (reused where possible) */
+    Z80_OP_LD_A_HL_ind,
+    Z80_OP_LD_HL_A_ind,
+    Z80_OP_LD_R_HL_ind,
+    Z80_OP_LD_HL_R_ind,
+    Z80_OP_LD_HL_N_ind,
+    Z80_OP_INC_HL_ind,
+    Z80_OP_DEC_HL_ind,
+    Z80_OP_ADD_A_HL_ind,
+    Z80_OP_SUB_A_HL_ind,
+    Z80_OP_AND_A_HL_ind,
+    Z80_OP_XOR_A_HL_ind,
+    Z80_OP_OR_A_HL_ind,
+    Z80_OP_CP_A_HL_ind,
+
+    /* Half index registers (IXH/IXL, IYH/IYL) */
+    Z80_OP_LD_A_IXH,
+    Z80_OP_LD_A_IXL,
 } z80_op_type;
 
 typedef struct {

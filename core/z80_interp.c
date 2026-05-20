@@ -28,22 +28,30 @@ static inline uint8_t *reg8_ptr(z80_cpu_t *cpu, int r) {
     case 4: return &cpu->h;
     case 5: return &cpu->l;
     case 7: return &cpu->a;
-    default: return NULL; /* (HL) or IX+d handled specially */
+    default: return NULL; /* (HL) / (IX+d) / (IY+d) handled specially */
     }
 }
 
-static inline uint8_t read_reg8(z80_cpu_t *cpu, int r) {
-    if (r == 6) { /* (HL) */
-        uint16_t addr = cpu->hl;
+/* Return the effective address for a memory operand, taking DD/FD prefix into account */
+static inline uint16_t effective_addr(z80_cpu_t *cpu, const z80_decoded *dec, uint16_t hl_fallback) {
+    if (dec->prefix == 0xDD) return cpu->ix + (int16_t)dec->disp;
+    if (dec->prefix == 0xFD) return cpu->iy + (int16_t)dec->disp;
+    return hl_fallback;
+}
+
+static inline uint8_t read_reg8(z80_cpu_t *cpu, int r, const z80_decoded *dec) {
+    if (r == 6) { /* (HL) or (IX+d) or (IY+d) */
+        uint16_t addr = effective_addr(cpu, dec, cpu->hl);
         return cpu->mem[addr & 0xFFFF];
     }
     uint8_t *p = reg8_ptr(cpu, r);
     return p ? *p : 0;
 }
 
-static inline void write_reg8(z80_cpu_t *cpu, int r, uint8_t val) {
+static inline void write_reg8(z80_cpu_t *cpu, int r, uint8_t val, const z80_decoded *dec) {
     if (r == 6) {
-        cpu->mem[cpu->hl & 0xFFFF] = val;
+        uint16_t addr = effective_addr(cpu, dec, cpu->hl);
+        cpu->mem[addr & 0xFFFF] = val;
         return;
     }
     uint8_t *p = reg8_ptr(cpu, r);
@@ -143,11 +151,37 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_LD_R_N:
-        write_reg8(cpu, dec.reg1, dec.imm8);
+        write_reg8(cpu, dec.reg1, dec.imm8, &dec);
         break;
 
     case Z80_OP_LD_R_R:
-        write_reg8(cpu, dec.reg1, read_reg8(cpu, dec.reg2));
+        write_reg8(cpu, dec.reg1, read_reg8(cpu, dec.reg2, &dec), &dec);
+        break;
+
+    case Z80_OP_INC_HL_ind:
+        {
+            uint16_t a = effective_addr(cpu, &dec, cpu->hl);
+            uint8_t v = cpu->mem[a] + 1;
+            cpu->mem[a] = v;
+            uint8_t f = cpu->f & Z80_FLAG_C;
+            if (v == 0) f |= Z80_FLAG_Z;
+            if (v & 0x80) f |= Z80_FLAG_S;
+            if ((v & 0xF) == 0) f |= Z80_FLAG_H;
+            cpu->f = f;
+        }
+        break;
+
+    case Z80_OP_DEC_HL_ind:
+        {
+            uint16_t a = effective_addr(cpu, &dec, cpu->hl);
+            uint8_t v = cpu->mem[a] - 1;
+            cpu->mem[a] = v;
+            uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N;
+            if (v == 0) f |= Z80_FLAG_Z;
+            if (v & 0x80) f |= Z80_FLAG_S;
+            if ((v & 0xF) == 0xF) f |= Z80_FLAG_H;
+            cpu->f = f;
+        }
         break;
 
     case Z80_OP_LD_NN_A:
@@ -164,6 +198,14 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_LD_A_DE:
         cpu->a = cpu->mem[cpu->de & 0xFFFF];
+        break;
+
+    /* IX/IY indexed memory forms (use the prefix/disp-aware helpers) */
+    case Z80_OP_LD_A_HL_ind:
+        cpu->a = read_reg8(cpu, 6, &dec);
+        break;
+    case Z80_OP_LD_HL_A_ind:
+        write_reg8(cpu, 6, cpu->a, &dec);
         break;
 
     case Z80_OP_LD_DE_A:
@@ -240,7 +282,7 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_ADD_A_R:
         {
-            uint8_t b = read_reg8(cpu, dec.reg1);
+            uint8_t b = read_reg8(cpu, dec.reg1, &dec);
             uint8_t res = cpu->a + b;
             set_flags_add(cpu, cpu->a, b, res);
             cpu->a = res;
@@ -255,9 +297,18 @@ int z80_step(z80_cpu_t *cpu) {
         }
         break;
 
+    case Z80_OP_ADD_A_HL_ind:
+        {
+            uint8_t b = read_reg8(cpu, 6, &dec);
+            uint8_t res = cpu->a + b;
+            set_flags_add(cpu, cpu->a, b, res);
+            cpu->a = res;
+        }
+        break;
+
     case Z80_OP_SUB_A_R:
         {
-            uint8_t b = read_reg8(cpu, dec.reg1);
+            uint8_t b = read_reg8(cpu, dec.reg1, &dec);
             uint8_t res = cpu->a - b;
             set_flags_sub(cpu, cpu->a, b, res);
             cpu->a = res;
@@ -273,7 +324,7 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_AND_A_R:
-        cpu->a &= read_reg8(cpu, dec.reg1);
+        cpu->a &= read_reg8(cpu, dec.reg1, &dec);
         set_flags_logic(cpu, cpu->a);
         cpu->f &= ~Z80_FLAG_N; cpu->f &= ~Z80_FLAG_C; cpu->f |= Z80_FLAG_H;
         break;
@@ -285,7 +336,7 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_OR_A_R:
-        cpu->a |= read_reg8(cpu, dec.reg1);
+        cpu->a |= read_reg8(cpu, dec.reg1, &dec);
         set_flags_logic(cpu, cpu->a);
         cpu->f &= ~Z80_FLAG_N; cpu->f &= ~Z80_FLAG_C; cpu->f &= ~Z80_FLAG_H;
         break;
@@ -297,7 +348,7 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_XOR_A_R:
-        cpu->a ^= read_reg8(cpu, dec.reg1);
+        cpu->a ^= read_reg8(cpu, dec.reg1, &dec);
         set_flags_logic(cpu, cpu->a);
         cpu->f &= ~Z80_FLAG_N; cpu->f &= ~Z80_FLAG_C; cpu->f &= ~Z80_FLAG_H;
         break;
@@ -310,7 +361,7 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_CP_A_R:
         {
-            uint8_t b = read_reg8(cpu, dec.reg1);
+            uint8_t b = read_reg8(cpu, dec.reg1, &dec);
             uint8_t res = cpu->a - b;
             set_flags_sub(cpu, cpu->a, b, res);
         }

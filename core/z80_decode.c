@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 
 /* Condition codes (for JP cc, CALL cc, RET cc, JR cc) */
 enum {
@@ -39,14 +40,14 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
     uint8_t op = mem[pc & 0xFFFF];
 
     /* =======================================================================
-     * Prefix handling (DD, FD, CB, ED) — pragmatic version for interpreter growth
-     * We consume leading DD/FD (last one wins for indexing), then CB/ED.
-     * Full DD/FD + CB + displacement handling is added incrementally as we
-     * encounter real programs that use it.
+     * Prefix handling for DD/FD (IX/IY), CB, ED
+     * This version properly consumes displacement bytes for indexed ops
+     * and handles the DD CB / FD CB forms.
      * ==================================================================== */
     uint8_t prefix = 0;
     int max_prefix = 4;
 
+    /* Consume leading DD/FD prefixes (last one wins) */
     while ((op == 0xDD || op == 0xFD) && max_prefix--) {
         prefix = op;
         out->prefix = prefix;
@@ -55,37 +56,101 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
         op = mem[pc & 0xFFFF];
     }
 
-    /* Now handle CB or ED (they can appear after DD/FD in theory) */
-    if (op == 0xCB || op == 0xED) {
-        prefix = op;
-        out->prefix = prefix;
-        pc++;
-        out->bytes++;
+    /* Handle CB (possibly DD CB d xx or FD CB d xx) */
+    if (op == 0xCB) {
+        out->prefix = prefix ? prefix : 0xCB;
 
-        if (prefix == 0xCB) {
-            /* CB always has one more byte: the actual operation (0x00-0xFF) */
-            out->imm8 = mem[pc & 0xFFFF];   /* stash CB sub-opcode */
-            pc++;
-            out->bytes++;
-            /* For DD CB d xx / FD CB d xx the displacement was already consumed
-             * by the earlier DD/FD logic if present. For plain CB this is fine. */
-        } else {
-            op = mem[pc & 0xFFFF];   /* ED sub-op */
+        if (prefix) {
+            /* DD CB d op or FD CB d op */
+            out->disp = (int8_t)mem[pc & 0xFFFF];
+            pc++; out->bytes++;
+        }
+
+        out->imm8 = mem[pc & 0xFFFF];   /* the CB sub-opcode */
+        pc++; out->bytes++;
+
+        out->type = Z80_OP_CB;
+        out->opcode = out->imm8;
+        return out->bytes;
+    }
+
+    /* Handle ED (rarely prefixed by DD/FD in practice) */
+    if (op == 0xED) {
+        out->prefix = 0xED;
+        pc++; out->bytes++;
+        op = mem[pc & 0xFFFF];
+    }
+
+    /* At this point we have a "main" opcode byte.
+     * If we have a DD or FD prefix, many opcodes will require a displacement. */
+    out->opcode = op;
+
+    /* Determine if this opcode (under DD/FD) needs a displacement byte */
+    bool needs_disp = false;
+
+    if (prefix == 0xDD || prefix == 0xFD) {
+        switch (op) {
+        /* Memory forms that use (IX+d) or (IY+d) */
+        case 0x34: case 0x35:           /* INC/DEC (IX+d) */
+        case 0x36:                      /* LD (IX+d), n */
+        case 0x46: case 0x4E: case 0x56: case 0x5E:
+        case 0x66: case 0x6E: case 0x7E: /* LD r, (IX+d) */
+        case 0x70: case 0x71: case 0x72: case 0x73:
+        case 0x74: case 0x75: case 0x77: /* LD (IX+d), r */
+        case 0x86: case 0x8E: case 0x96: case 0x9E:
+        case 0xA6: case 0xAE: case 0xB6: case 0xBE: /* ALU A, (IX+d) */
+            needs_disp = true;
+            break;
+
+        /* JP (IX) / JP (IY) — no displacement */
+        case 0xE9:
+            break;
+
+        /* Default: some opcodes use IXH/IXL instead of H/L (no disp) */
+        default:
+            break;
         }
     }
 
-    if (prefix == 0xCB) {
-        out->type = Z80_OP_CB;
-        out->opcode = out->imm8;   /* the CB sub-opcode (0x00-0xFF) */
-        return out->bytes;         /* CB is fully decoded; no further main-table work */
+    if (needs_disp) {
+        out->disp = (int8_t)mem[pc & 0xFFFF];
+        pc++;
+        out->bytes++;
     }
 
-    out->opcode = op;
+    /* -----------------------------------------------------------------------
+     * Prefix-aware remapping for common DD/FD (IX/IY) indexed ops.
+     * We set type + reg1=6 (memory) so the interpreter can use prefix+disp.
+     * -------------------------------------------------------------------- */
+    if ((prefix == 0xDD || prefix == 0xFD) && out->type == 0 /* not already set by CB */) {
+        switch (op) {
+        case 0x7E:  out->type = Z80_OP_LD_A_HL_ind; out->reg1 = 6; break;
+        case 0x77:  out->type = Z80_OP_LD_HL_A_ind; out->reg1 = 6; break;
+        case 0x46: case 0x4E: case 0x56: case 0x5E: case 0x66: case 0x6E:
+            out->type = Z80_OP_LD_R_HL_ind; out->reg1 = 6; out->reg2 = (op >> 3) & 7; break;
+        case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75:
+            out->type = Z80_OP_LD_HL_R_ind; out->reg1 = 6; out->reg2 = op & 7; break;
+        case 0x34: out->type = Z80_OP_INC_HL_ind; out->reg1 = 6; break;
+        case 0x35: out->type = Z80_OP_DEC_HL_ind; out->reg1 = 6; break;
+        case 0x36: out->type = Z80_OP_LD_HL_N_ind; out->reg1 = 6;
+                   out->imm8 = mem[pc & 0xFFFF]; pc++; out->bytes++; break;
+
+        /* ALU A, (IX+d) */
+        case 0x86: out->type = Z80_OP_ADD_A_HL_ind; out->reg1 = 6; break;
+        case 0x96: out->type = Z80_OP_SUB_A_HL_ind; out->reg1 = 6; break;
+        case 0xA6: out->type = Z80_OP_AND_A_HL_ind; out->reg1 = 6; break;
+        case 0xAE: out->type = Z80_OP_XOR_A_HL_ind; out->reg1 = 6; break;
+        case 0xB6: out->type = Z80_OP_OR_A_HL_ind;  out->reg1 = 6; break;
+        case 0xBE: out->type = Z80_OP_CP_A_HL_ind;  out->reg1 = 6; break;
+
+        /* Half-registers (IXH/IXL etc.) - add more as real programs hit them */
+        case 0x7C: out->type = Z80_OP_LD_A_IXH; break;
+        case 0x7D: out->type = Z80_OP_LD_A_IXL; break;
+        }
+    }
 
     /* -----------------------------------------------------------------------
      * Main dispatch table.  We fill this out as we grow the interpreter.
-     * When we see an opcode we haven't wired yet we leave it UNKNOWN and
-     * the interpreter will loudly complain — perfect for discovery.
      * -------------------------------------------------------------------- */
     switch (op) {
     case 0x00: out->type = Z80_OP_NOP; break;
