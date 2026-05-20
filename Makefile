@@ -60,6 +60,8 @@ $(TARGET): $(OBJS)
 clean:
 	rm -f $(OBJS) $(TARGET)
 	rm -rf core/*.o dbt/*.o cpm/*.o kaypro/*.o
+	rm -f tools/mkhello tools/mkblock
+	rm -f tests/*.com tests/*.bin
 
 # Placeholder test target — will expand when we have .COM tests
 test:
