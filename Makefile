@@ -97,8 +97,15 @@ tests/ix.com: tools/mkix
 tools/mkix: tools/mkix.c
 	$(CC) -o $@ $<
 
+tests/console.com: tools/mkconsole
+	@mkdir -p tests
+	./tools/mkconsole
+
+tools/mkconsole: tools/mkconsole.c
+	$(CC) -o $@ $<
+
 # Quick sanity: does it even compile and say hello?
-smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com tests/ix.com
+smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/console.com
 	@echo "=== Smoke test ==="
 	./$(TARGET) --version || true
 	@echo
@@ -114,4 +121,8 @@ smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com tests/ix.com
 	@echo "=== Running ix.com (IX+d + IXH test) ==="
 	./$(TARGET) -s tests/ix.com
 	@echo
-	@echo "Growth is working if we saw no UNIMPLEMENTED errors and clean exits."
+	@echo "=== Running console.com (interactive CONST/CONIN/CONOUT test) ==="
+	@echo "    (Press keys — it should echo. ESC or 'q' to exit cleanly)"
+	./$(TARGET) -s tests/console.com
+	@echo
+	@echo "Environment console layer is live if the echo test feels responsive."

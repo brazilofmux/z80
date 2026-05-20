@@ -101,6 +101,11 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu);
 void cpm_install_bios(z80_cpu_t *cpu);
 int  cpm_bios_dispatch(z80_cpu_t *cpu);
 
+/* Unified console functions (used by both BDOS and BIOS) */
+void    cpm_conout(uint8_t ch);
+uint8_t cpm_conin(void);
+uint8_t cpm_constat(void);   /* returns 0 or 0xFF */
+
 /* Load a .COM file at 0x0100, set up the CP/M memory image, and
  * prepare the CPU to run it (PC=0x0100, stack high, C=0 for CCP compat).
  */

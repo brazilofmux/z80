@@ -19,7 +19,7 @@ static void enter_raw_mode(void) {
     tcgetattr(STDIN_FILENO, &orig_termios);
     struct termios raw = orig_termios;
     raw.c_lflag &= ~(ICANON | ECHO);
-    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VMIN] = 1;     /* block until at least one character for CONIN */
     raw.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
     term_raw = 1;

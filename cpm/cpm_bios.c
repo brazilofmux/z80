@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <termios.h>
+#include <sys/select.h>
+#include <sys/time.h>
 
 /* Forward decls for console helpers (we can share logic with BDOS later) */
 static int  bios_const(z80_cpu_t *cpu);
@@ -96,25 +98,56 @@ int cpm_bios_dispatch(z80_cpu_t *cpu) {
     }
 }
 
-/* --- Minimal console implementations (can be improved with raw termios) --- */
+/* ======================================================================
+ * Real Console Implementation (used by both BDOS and BIOS)
+ * ===================================================================== */
+
+/* CONOUT — write one character (used by BDOS 2 and BIOS CONOUT) */
+void cpm_conout(uint8_t ch) {
+    putchar(ch);
+    fflush(stdout);
+}
+
+/* CONIN — blocking read of one character.
+ * With raw mode + VMIN=1 this works nicely. */
+uint8_t cpm_conin(void) {
+    unsigned char ch;
+    ssize_t n = read(STDIN_FILENO, &ch, 1);
+    if (n <= 0) {
+        return 0x1A;   /* CP/M EOF / ^Z */
+    }
+    return ch;
+}
+
+/* CONST — console status (non-blocking "is a key available?").
+ * Returns 0xFF if ready, 0 if not. */
+uint8_t cpm_constat(void) {
+    fd_set rfds;
+    struct timeval tv = {0, 0};   /* zero timeout = poll */
+
+    FD_ZERO(&rfds);
+    FD_SET(STDIN_FILENO, &rfds);
+
+    int ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+    if (ret > 0 && FD_ISSET(STDIN_FILENO, &rfds)) {
+        return 0xFF;   /* character ready */
+    }
+    return 0;
+}
+
+/* --- BIOS wrappers (these are what the BIOS dispatch calls) --- */
 
 static int bios_const(z80_cpu_t *cpu) {
-    /* Non-blocking check — for now always say "no key ready"
-     * so polling loops don't hang. Later we'll wire real kbhit. */
     (void)cpu;
-    return 0;
+    return cpm_constat() == 0xFF ? 1 : 0;
 }
 
 static int bios_conin(z80_cpu_t *cpu) {
     (void)cpu;
-    /* Blocking read from stdin for now */
-    int ch = getchar();
-    if (ch == EOF) ch = 0x1A; /* CP/M EOF */
-    return ch & 0xFF;
+    return cpm_conin();
 }
 
 static void bios_conout(z80_cpu_t *cpu, uint8_t ch) {
     (void)cpu;
-    putchar(ch);
-    fflush(stdout);
+    cpm_conout(ch);
 }

@@ -17,8 +17,7 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
         return 0;   /* tell the run loop to stop */
 
     case CPM_F_CONOUT:  /* 2 - console output char in E */
-        putchar(cpu->e);
-        fflush(stdout);
+        cpm_conout(cpu->e);
         cpu->a = 0;
         return 1;
 
@@ -28,18 +27,19 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
             for (;;) {
                 uint8_t ch = cpu->mem[addr & 0xFFFF];
                 if (ch == '$') break;
-                putchar(ch);
+                cpm_conout(ch);
                 addr++;
             }
-            fflush(stdout);
             cpu->a = 0;
         }
         return 1;
 
-    case CPM_F_CONSTAT: /* 11 - console status (0 = no key, 0xFF = key ready) */
-        /* For a first version we always say "no key" so programs that poll
-         * don't hang. Later we will wire real termios kbhit. */
-        cpu->a = 0;
+    case CPM_F_CONSTAT: /* 11 - console status */
+        cpu->a = cpm_constat();
+        return 1;
+
+    case CPM_F_CONIN:   /* 1 - console input (blocking) */
+        cpu->a = cpm_conin();
         return 1;
 
     case CPM_F_VERSION: /* 12 */
