@@ -1,0 +1,34 @@
+# Build artifacts
+*.o
+*.obj
+
+# Binaries we build (keep the .c sources)
+z80-monster
+tools/mkhello
+tools/mkblock
+
+# Future generated test binaries
+tests/*.com
+tests/*.bin
+
+# But always keep C sources
+!**/*.c
+!**/*.h
+
+# Generated test programs
+tests/*.com
+tests/*.bin
+
+# Editor / OS noise
+.DS_Store
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Future DBT / emulator outputs we may generate
+*.log
+*.trace
+perf.data*
+callgrind.out.*
