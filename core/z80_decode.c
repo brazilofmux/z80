@@ -74,11 +74,48 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
         return out->bytes;
     }
 
-    /* Handle ED (rarely prefixed by DD/FD in practice) */
+    /* Handle ED (rarely prefixed by DD/FD in practice).
+     *
+     * ED-prefixed opcodes are a separate ISA from the main one — 0x42 here
+     * is SBC HL,BC, not LD B,D. Decode entirely in this block and return so
+     * the main switch never gets a chance to misclassify them. */
     if (op == 0xED) {
+        prefix = 0xED;
         out->prefix = 0xED;
         pc++; out->bytes++;
         op = mem[pc & 0xFFFF];
+        out->opcode = op;
+
+        switch (op) {
+        case 0x42: out->type = Z80_OP_SBC_HL_RR; out->reg1 = RR_BC; return out->bytes;
+        case 0x52: out->type = Z80_OP_SBC_HL_RR; out->reg1 = RR_DE; return out->bytes;
+        case 0x62: out->type = Z80_OP_SBC_HL_RR; out->reg1 = RR_HL; return out->bytes;
+        case 0x72: out->type = Z80_OP_SBC_HL_RR; out->reg1 = 3;     return out->bytes;  /* SP */
+        case 0x4A: out->type = Z80_OP_ADC_HL_RR; out->reg1 = RR_BC; return out->bytes;
+        case 0x5A: out->type = Z80_OP_ADC_HL_RR; out->reg1 = RR_DE; return out->bytes;
+        case 0x6A: out->type = Z80_OP_ADC_HL_RR; out->reg1 = RR_HL; return out->bytes;
+        case 0x7A: out->type = Z80_OP_ADC_HL_RR; out->reg1 = 3;     return out->bytes;  /* SP */
+        case 0x43: case 0x53: case 0x63: case 0x73:  /* LD (nn),rr  */
+            out->type = Z80_OP_LD_NN_RR;
+            out->reg1 = (op >> 4) - 4;   /* 0x43->0, 0x53->1, 0x63->2, 0x73->3 */
+            out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+            out->bytes += 2;
+            return out->bytes;
+        case 0x4B: case 0x5B: case 0x6B: case 0x7B:  /* LD rr,(nn)  */
+            out->type = Z80_OP_LD_RR_NN_IND;
+            out->reg1 = (op >> 4) - 4;
+            out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+            out->bytes += 2;
+            return out->bytes;
+        case 0x44: out->type = Z80_OP_NEG;  return out->bytes;
+        case 0xA0: out->type = Z80_OP_LDI;  return out->bytes;
+        case 0xA8: out->type = Z80_OP_LDD;  return out->bytes;
+        case 0xB0: out->type = Z80_OP_LDIR; return out->bytes;
+        case 0xB8: out->type = Z80_OP_LDDR; return out->bytes;
+        default:
+            out->type = Z80_OP_UNKNOWN;
+            return out->bytes;
+        }
     }
 
     /* At this point we have a "main" opcode byte.
@@ -148,6 +185,10 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
         /* Half-registers */
         case 0x7C: out->type = Z80_OP_LD_A_IXH; return out->bytes;
         case 0x7D: out->type = Z80_OP_LD_A_IXL; return out->bytes;
+
+        /* DD/FD E1/E5 — POP/PUSH IX/IY.  reg1=0 means "IX or IY per dec.prefix". */
+        case 0xE1: out->type = Z80_OP_POP_RR;  out->reg1 = 4; return out->bytes;
+        case 0xE5: out->type = Z80_OP_PUSH_RR; out->reg1 = 4; return out->bytes;
         }
     }
 
@@ -459,20 +500,8 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
     case 0xFF: out->type = Z80_OP_RST; out->imm8 = 0x38; break;
     }
 
-    /* ED prefix block instructions (very common in CP/M for I/O and block moves) */
-    if (prefix == 0xED) {
-        switch (op) {
-        case 0x44: out->type = Z80_OP_NEG; break;
-        case 0xA0: out->type = Z80_OP_LDI; break;
-        case 0xA8: out->type = Z80_OP_LDD; break;
-        case 0xB0: out->type = Z80_OP_LDIR; break;
-        case 0xB8: out->type = Z80_OP_LDDR; break;
-        /* Many more: CPI, CPIR, INI, OUTI, etc. — added as encountered */
-        default:
-            /* Unknown ED xx — interpreter will loudly reject when executed */
-            break;
-        }
-    }
+    /* ED prefix is now fully handled at the top of this function and returns
+     * before reaching here, so no late-pass override is needed. */
 
     /* Legacy placeholder cleanup — safe to ignore for now */
     if (prefix == 0xCB && out->type == 0) {

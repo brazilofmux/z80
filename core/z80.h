@@ -231,6 +231,14 @@ typedef enum {
     Z80_OP_DI,
     Z80_OP_EI,
     Z80_OP_HALT,
+
+    /* 16-bit ADC/SBC HL,rr (ED-prefix) */
+    Z80_OP_ADC_HL_RR,
+    Z80_OP_SBC_HL_RR,
+
+    /* ED 43/53/63/73 — LD (nn),rr  ;  ED 4B/5B/6B/7B — LD rr,(nn) */
+    Z80_OP_LD_NN_RR,
+    Z80_OP_LD_RR_NN_IND,
 } z80_op_type;
 
 typedef struct {

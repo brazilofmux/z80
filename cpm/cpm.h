@@ -17,6 +17,15 @@
 #define CPM_BDOS_ENTRY  0x0005
 #define CPM_WBOOT_ENTRY 0x0000
 
+/* What we store at (5..7) as the BDOS jump target. CP/M programs do
+ *   ld hl,(6)     ; get top-of-TPA / BDOS entry
+ *   ld sp,hl
+ * to set their stack to the highest free address. They also do
+ *   call 5        ; -> JP (6) -> the BDOS entry
+ * which we trap on PC==0x0005 before the JP body executes, so the JP
+ * destination is only used as a stack-top value. Keep it below BIOS. */
+#define CPM_BDOS_HIGH   0xE400
+
 /* BIOS base — chosen so we have a 62K TPA (common for CP/M 2.2 on 64K machines) */
 #define CPM_BIOS_BASE   0xF200
 

@@ -13,9 +13,12 @@ void cpm_install(z80_cpu_t *cpu) {
     cpu->mem[0x0001] = 0x00;
     cpu->mem[0x0002] = 0xF0;
 
-    cpu->mem[0x0005] = 0xC3; /* JP 0x0005 — self-referential so the interpreter trap on PC==0x0005 fires */
-    cpu->mem[0x0006] = 0x05;
-    cpu->mem[0x0007] = 0x00;
+    /* BDOS entry trampoline. We trap on PC==0x0005 before the JP body
+     * runs, so the destination address here is only used by programs
+     * that do `ld hl,(6); ld sp,hl` to set SP to top-of-TPA. */
+    cpu->mem[0x0005] = 0xC3; /* JP */
+    cpu->mem[0x0006] = CPM_BDOS_HIGH & 0xFF;
+    cpu->mem[0x0007] = CPM_BDOS_HIGH >> 8;
 
     memcpy(cpu->mem + 0xF000, "CPM2MONSTER", 12);
 

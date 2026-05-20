@@ -556,6 +556,13 @@ int z80_step(z80_cpu_t *cpu) {
         }
         break;
 
+    case Z80_OP_LD_SP_HL:
+        /* F9: LD SP,HL (or LD SP,IX/IY with DD/FD prefix). */
+        if (dec.prefix == 0xDD) cpu->sp = cpu->ix;
+        else if (dec.prefix == 0xFD) cpu->sp = cpu->iy;
+        else cpu->sp = cpu->hl;
+        break;
+
     case Z80_OP_JP_HL:
         cpu->pc = cpu->hl;
         /* CP/M vector indirection (BDOS at 0005 or BIOS via 0001) */
@@ -643,7 +650,14 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_PUSH_RR:
         {
-            uint16_t v = (dec.reg1 == 3) ? cpu->af : read_rr(cpu, dec.reg1);
+            uint16_t v;
+            if (dec.reg1 == 4) {            /* DD/FD E5: PUSH IX/IY */
+                v = (dec.prefix == 0xFD) ? cpu->iy : cpu->ix;
+            } else if (dec.reg1 == 3) {     /* AF */
+                v = cpu->af;
+            } else {
+                v = read_rr(cpu, dec.reg1);
+            }
             cpu->sp = (cpu->sp - 2) & 0xFFFF;
             cpu->mem[cpu->sp]     = v & 0xFF;
             cpu->mem[(cpu->sp + 1) & 0xFFFF] = v >> 8;
@@ -654,8 +668,13 @@ int z80_step(z80_cpu_t *cpu) {
         {
             uint16_t v = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
             cpu->sp = (cpu->sp + 2) & 0xFFFF;
-            if (dec.reg1 == 3) cpu->af = v;
-            else write_rr(cpu, dec.reg1, v);
+            if (dec.reg1 == 4) {            /* DD/FD E1: POP IX/IY */
+                if (dec.prefix == 0xFD) cpu->iy = v; else cpu->ix = v;
+            } else if (dec.reg1 == 3) {
+                cpu->af = v;
+            } else {
+                write_rr(cpu, dec.reg1, v);
+            }
         }
         break;
 
@@ -787,6 +806,64 @@ int z80_step(z80_cpu_t *cpu) {
             f &= ~Z80_FLAG_N;
             cpu->f = f;
             cpu->hl = (uint16_t)res;
+        }
+        break;
+
+    case Z80_OP_ADC_HL_RR:
+        {
+            /* ED 4A/5A/6A/7A — ADC HL,BC/DE/HL/SP. Writes ALL flags (unlike ADD HL). */
+            uint16_t a = cpu->hl;
+            uint16_t b = (dec.reg1 == 3) ? cpu->sp : read_rr(cpu, dec.reg1);
+            uint16_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
+            uint32_t res = (uint32_t)a + b + cin;
+            uint16_t r = (uint16_t)res;
+            uint8_t f = 0;
+            if (r == 0) f |= Z80_FLAG_Z;
+            if (r & 0x8000) f |= Z80_FLAG_S;
+            if (((a & 0x0FFF) + (b & 0x0FFF) + cin) & 0x1000) f |= Z80_FLAG_H;
+            if (res & 0x10000) f |= Z80_FLAG_C;
+            /* PV: signed overflow */
+            if (((a ^ b) & 0x8000) == 0 && ((r ^ a) & 0x8000)) f |= Z80_FLAG_PV;
+            cpu->f = f;
+            cpu->hl = r;
+        }
+        break;
+
+    case Z80_OP_LD_NN_RR:
+        {
+            /* ED 43/53/63/73 — LD (nn),rr  for BC/DE/HL/SP */
+            uint16_t v = (dec.reg1 == 3) ? cpu->sp : read_rr(cpu, dec.reg1);
+            cpu->mem[dec.imm16 & 0xFFFF]       = v & 0xFF;
+            cpu->mem[(dec.imm16 + 1) & 0xFFFF] = (v >> 8) & 0xFF;
+        }
+        break;
+
+    case Z80_OP_LD_RR_NN_IND:
+        {
+            /* ED 4B/5B/6B/7B — LD rr,(nn) for BC/DE/HL/SP */
+            uint16_t v = cpu->mem[dec.imm16 & 0xFFFF]
+                      | (cpu->mem[(dec.imm16 + 1) & 0xFFFF] << 8);
+            if (dec.reg1 == 3) cpu->sp = v;
+            else write_rr(cpu, dec.reg1, v);
+        }
+        break;
+
+    case Z80_OP_SBC_HL_RR:
+        {
+            /* ED 42/52/62/72 — SBC HL,BC/DE/HL/SP. Writes ALL flags, N=1. */
+            uint16_t a = cpu->hl;
+            uint16_t b = (dec.reg1 == 3) ? cpu->sp : read_rr(cpu, dec.reg1);
+            uint16_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
+            uint32_t res = (uint32_t)a - b - cin;
+            uint16_t r = (uint16_t)res;
+            uint8_t f = Z80_FLAG_N;
+            if (r == 0) f |= Z80_FLAG_Z;
+            if (r & 0x8000) f |= Z80_FLAG_S;
+            if (((a & 0x0FFF) - (b & 0x0FFF) - cin) & 0x1000) f |= Z80_FLAG_H;
+            if (res & 0x10000) f |= Z80_FLAG_C;
+            if (((a ^ b) & 0x8000) && ((r ^ a) & 0x8000)) f |= Z80_FLAG_PV;
+            cpu->f = f;
+            cpu->hl = r;
         }
         break;
 

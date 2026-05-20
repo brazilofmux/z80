@@ -10,6 +10,7 @@
 
 static struct termios orig_termios;
 static int term_raw = 0;
+int trace_block_ops = 0;
 
 static void print_banner(void) {
     printf("z80-monster — 10 BIPS CP/M Monster\n");
@@ -68,6 +69,8 @@ int main(int argc, char **argv) {
             return 0;
         } else if (strcmp(argv[i], "-s") == 0) {
             show_stats = 1;
+        } else if (strcmp(argv[i], "-T") == 0) {
+            trace_block_ops = 1;
         } else if (argv[i][0] != '-') {
             if (!disk_root && !prog) {
                 /* First non-option argument */
@@ -179,8 +182,13 @@ int main(int argc, char **argv) {
                     (unsigned long long)cpu.insn_count, cpu.c);
             break;
         }
-        if (cpu.insn_count > 2000000000ULL) {
-            fprintf(stderr, "Safety limit (2B insns) reached — possible infinite loop or very long interactive wait\n");
+        if (trace_block_ops && (cpu.insn_count & 0x3FFFFFF) == 0 && cpu.insn_count) {
+            fprintf(stderr, "[%llu] PC=%04X SP=%04X HL=%04X DE=%04X BC=%04X AF=%04X IX=%04X IY=%04X\n",
+                    (unsigned long long)cpu.insn_count, cpu.pc, cpu.sp,
+                    cpu.hl, cpu.de, cpu.bc, cpu.af, cpu.ix, cpu.iy);
+        }
+        if (cpu.insn_count > 50000000000ULL) {
+            fprintf(stderr, "Safety limit (50B insns) reached — bug or wait?\n");
             break;
         }
     }
