@@ -106,6 +106,19 @@ void    cpm_conout(uint8_t ch);
 uint8_t cpm_conin(void);
 uint8_t cpm_constat(void);   /* returns 0 or 0xFF */
 
+/* Disk / FCB support */
+#define CPM_DEFAULT_DMA   0x0080
+#define CPM_FCB_SIZE      36
+
+/* Public disk functions */
+void cpm_disk_init(void);
+void cpm_disk_install_defaults(z80_cpu_t *cpu);
+void cpm_set_dma(uint16_t addr);
+int  cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr);
+int  cpm_bdos_close_file(z80_cpu_t *cpu, uint16_t fcb_addr);
+int  cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr);
+int  cpm_bdos_set_dma(z80_cpu_t *cpu);  /* uses DE */
+
 /* Load a .COM file at 0x0100, set up the CP/M memory image, and
  * prepare the CPU to run it (PC=0x0100, stack high, C=0 for CCP compat).
  */

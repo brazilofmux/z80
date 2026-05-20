@@ -46,10 +46,17 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
         cpu->hl = 0x0022; /* CP/M 2.2 */
         return 1;
 
-    case CPM_F_SETDMA:  /* 26 - set DMA address (DE) */
-        /* We don't have full FCB handling yet, but we record it */
-        /* For now just ignore; real disk I/O will need it. */
-        return 1;
+    case CPM_F_SETDMA:   /* 26 */
+        return cpm_bdos_set_dma(cpu);
+
+    case CPM_F_OPEN:     /* 15 */
+        return cpm_bdos_open_file(cpu, cpu->de);
+
+    case CPM_F_CLOSE:    /* 16 */
+        return cpm_bdos_close_file(cpu, cpu->de);
+
+    case CPM_F_READ:     /* 20 - read sequential */
+        return cpm_bdos_read_sequential(cpu, cpu->de);
 
     default:
         fprintf(stderr, "\n[BDOS] unimplemented function %d (C=%d)  DE=%04X\n",

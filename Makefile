@@ -28,7 +28,7 @@ endif
 
 # Core sources (will grow)
 CORE_SRCS = core/z80_decode.c core/z80_interp.c core/z80_state.c
-CPM_SRCS  = cpm/cpm_bdos.c cpm/cpm_bios.c cpm/cpm_loader.c
+CPM_SRCS  = cpm/cpm_bdos.c cpm/cpm_bios.c cpm/cpm_loader.c cpm/cpm_disk.c
 KAYPRO_SRCS = kaypro/kaypro_video.c kaypro/kaypro_kbd.c
 
 # DBT sources
