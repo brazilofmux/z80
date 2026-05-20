@@ -120,40 +120,41 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
 
     /* -----------------------------------------------------------------------
      * Prefix-aware remapping for common DD/FD (IX/IY) indexed ops.
-     * We set type + reg1=6 (memory) so the interpreter can use prefix+disp.
+     * Short-circuit return so the plain main switch doesn't overwrite the type.
      * -------------------------------------------------------------------- */
-    if ((prefix == 0xDD || prefix == 0xFD) && out->type == 0 /* not already set by CB */) {
+    if (prefix == 0xDD || prefix == 0xFD) {
         switch (op) {
-        case 0x7E:  out->type = Z80_OP_LD_A_HL_ind; out->reg1 = 6; break;
-        case 0x77:  out->type = Z80_OP_LD_HL_A_ind; out->reg1 = 6; break;
+        case 0x7E:  out->type = Z80_OP_LD_A_HL_ind; out->reg1 = 6; return out->bytes;
+        case 0x77:  out->type = Z80_OP_LD_HL_A_ind; out->reg1 = 6; return out->bytes;
         case 0x46: case 0x4E: case 0x56: case 0x5E: case 0x66: case 0x6E:
-            out->type = Z80_OP_LD_R_HL_ind; out->reg1 = 6; out->reg2 = (op >> 3) & 7; break;
+            out->type = Z80_OP_LD_R_HL_ind; out->reg1 = 6; out->reg2 = (op >> 3) & 7; return out->bytes;
         case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75:
-            out->type = Z80_OP_LD_HL_R_ind; out->reg1 = 6; out->reg2 = op & 7; break;
-        case 0x34: out->type = Z80_OP_INC_HL_ind; out->reg1 = 6; break;
-        case 0x35: out->type = Z80_OP_DEC_HL_ind; out->reg1 = 6; break;
+            out->type = Z80_OP_LD_HL_R_ind; out->reg1 = 6; out->reg2 = op & 7; return out->bytes;
+        case 0x34: out->type = Z80_OP_INC_HL_ind; out->reg1 = 6; return out->bytes;
+        case 0x35: out->type = Z80_OP_DEC_HL_ind; out->reg1 = 6; return out->bytes;
         case 0x36: out->type = Z80_OP_LD_HL_N_ind; out->reg1 = 6;
-                   out->imm8 = mem[pc & 0xFFFF]; pc++; out->bytes++; break;
+                   out->imm8 = mem[pc & 0xFFFF]; pc++; out->bytes++; return out->bytes;
 
         /* ALU A, (IX+d) */
-        case 0x86: out->type = Z80_OP_ADD_A_HL_ind; out->reg1 = 6; break;
-        case 0x96: out->type = Z80_OP_SUB_A_HL_ind; out->reg1 = 6; break;
-        case 0xA6: out->type = Z80_OP_AND_A_HL_ind; out->reg1 = 6; break;
-        case 0xAE: out->type = Z80_OP_XOR_A_HL_ind; out->reg1 = 6; break;
-        case 0xB6: out->type = Z80_OP_OR_A_HL_ind;  out->reg1 = 6; break;
-        case 0xBE: out->type = Z80_OP_CP_A_HL_ind;  out->reg1 = 6; break;
+        case 0x86: out->type = Z80_OP_ADD_A_HL_ind; out->reg1 = 6; return out->bytes;
+        case 0x96: out->type = Z80_OP_SUB_A_HL_ind; out->reg1 = 6; return out->bytes;
+        case 0xA6: out->type = Z80_OP_AND_A_HL_ind; out->reg1 = 6; return out->bytes;
+        case 0xAE: out->type = Z80_OP_XOR_A_HL_ind; out->reg1 = 6; return out->bytes;
+        case 0xB6: out->type = Z80_OP_OR_A_HL_ind;  out->reg1 = 6; return out->bytes;
+        case 0xBE: out->type = Z80_OP_CP_A_HL_ind;  out->reg1 = 6; return out->bytes;
 
-        /* Half-registers (IXH/IXL etc.) - add more as real programs hit them */
-        case 0x7C: out->type = Z80_OP_LD_A_IXH; break;
-        case 0x7D: out->type = Z80_OP_LD_A_IXL; break;
+        /* Half-registers */
+        case 0x7C: out->type = Z80_OP_LD_A_IXH; return out->bytes;
+        case 0x7D: out->type = Z80_OP_LD_A_IXL; return out->bytes;
         }
     }
 
     /* -----------------------------------------------------------------------
-     * Main dispatch table.  We fill this out as we grow the interpreter.
+     * Main dispatch table (only for non-prefix-handled instructions).
      * -------------------------------------------------------------------- */
-    switch (op) {
-    case 0x00: out->type = Z80_OP_NOP; break;
+    if (!handled_by_prefix) {
+        switch (op) {
+        case 0x00: out->type = Z80_OP_NOP; break;
     case 0x01: /* LD BC, nn */
         out->type = Z80_OP_LD_RR_NN; out->reg1 = RR_BC;
         out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);

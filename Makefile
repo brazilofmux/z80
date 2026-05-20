@@ -90,8 +90,15 @@ tests/cb.com: tools/mkcb
 tools/mkcb: tools/mkcb.c
 	$(CC) -o $@ $<
 
+tests/ix.com: tools/mkix
+	@mkdir -p tests
+	./tools/mkix
+
+tools/mkix: tools/mkix.c
+	$(CC) -o $@ $<
+
 # Quick sanity: does it even compile and say hello?
-smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com
+smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com tests/ix.com
 	@echo "=== Smoke test ==="
 	./$(TARGET) --version || true
 	@echo
@@ -104,4 +111,7 @@ smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com
 	@echo "=== Running cb.com (CB rotate + BIT test) ==="
 	./$(TARGET) -s tests/cb.com
 	@echo
-	@echo "Growth is working if we saw no UNIMPLEMENTED errors."
+	@echo "=== Running ix.com (IX+d + IXH test) ==="
+	./$(TARGET) -s tests/ix.com
+	@echo
+	@echo "Growth is working if we saw no UNIMPLEMENTED errors and clean exits."

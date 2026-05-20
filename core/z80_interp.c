@@ -208,6 +208,18 @@ int z80_step(z80_cpu_t *cpu) {
         write_reg8(cpu, 6, cpu->a, &dec);
         break;
 
+    case Z80_OP_LD_R_HL_ind:
+        write_reg8(cpu, dec.reg2, read_reg8(cpu, 6, &dec), &dec);
+        break;
+
+    case Z80_OP_LD_HL_R_ind:
+        write_reg8(cpu, 6, read_reg8(cpu, dec.reg2, &dec), &dec);
+        break;
+
+    case Z80_OP_LD_HL_N_ind:
+        write_reg8(cpu, 6, dec.imm8, &dec);
+        break;
+
     case Z80_OP_LD_DE_A:
         cpu->mem[cpu->de & 0xFFFF] = cpu->a;
         break;
@@ -217,12 +229,12 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_INC_R:
-        if (dec.reg1 == 6) { /* (HL) */
-            uint16_t a = cpu->hl;
+        if (dec.reg1 == 6) { /* (HL) or (IX+d)/(IY+d) */
+            uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] + 1;
             cpu->mem[a] = v;
             /* set flags for INC */
-            uint8_t f = cpu->f & (Z80_FLAG_C); /* preserve C */
+            uint8_t f = cpu->f & (Z80_FLAG_C);
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
             if ((v & 0xF) == 0) f |= Z80_FLAG_H;
@@ -246,7 +258,7 @@ int z80_step(z80_cpu_t *cpu) {
     case Z80_OP_DEC_R:
         /* similar but subtract 1, set N */
         if (dec.reg1 == 6) {
-            uint16_t a = cpu->hl;
+            uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] - 1;
             cpu->mem[a] = v;
             uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N;
@@ -303,6 +315,41 @@ int z80_step(z80_cpu_t *cpu) {
             uint8_t res = cpu->a + b;
             set_flags_add(cpu, cpu->a, b, res);
             cpu->a = res;
+        }
+        break;
+
+    case Z80_OP_SUB_A_HL_ind:
+        {
+            uint8_t b = read_reg8(cpu, 6, &dec);
+            uint8_t res = cpu->a - b;
+            set_flags_sub(cpu, cpu->a, b, res);
+            cpu->a = res;
+        }
+        break;
+
+    case Z80_OP_AND_A_HL_ind:
+        cpu->a &= read_reg8(cpu, 6, &dec);
+        set_flags_logic(cpu, cpu->a);
+        cpu->f &= ~Z80_FLAG_N; cpu->f &= ~Z80_FLAG_C; cpu->f |= Z80_FLAG_H;
+        break;
+
+    case Z80_OP_XOR_A_HL_ind:
+        cpu->a ^= read_reg8(cpu, 6, &dec);
+        set_flags_logic(cpu, cpu->a);
+        cpu->f &= ~Z80_FLAG_N; cpu->f &= ~Z80_FLAG_C; cpu->f &= ~Z80_FLAG_H;
+        break;
+
+    case Z80_OP_OR_A_HL_ind:
+        cpu->a |= read_reg8(cpu, 6, &dec);
+        set_flags_logic(cpu, cpu->a);
+        cpu->f &= ~Z80_FLAG_N; cpu->f &= ~Z80_FLAG_C; cpu->f &= ~Z80_FLAG_H;
+        break;
+
+    case Z80_OP_CP_A_HL_ind:
+        {
+            uint8_t b = read_reg8(cpu, 6, &dec);
+            uint8_t res = cpu->a - b;
+            set_flags_sub(cpu, cpu->a, b, res);
         }
         break;
 
@@ -733,6 +780,16 @@ int z80_step(z80_cpu_t *cpu) {
         cpu->f = new_f;
         break;
     }
+
+    /* Half index register operations (IXH/IXL, IYH/IYL) */
+    case Z80_OP_LD_A_IXH:
+        cpu->a = cpu->ix >> 8;
+        break;
+    case Z80_OP_LD_A_IXL:
+        cpu->a = cpu->ix & 0xFF;
+        break;
+
+    /* More half-reg cases (LD IXH, A, INC IXH, ADD A,IXH, etc.) added as needed */
 
     default:
         fprintf(stderr, "z80_step: UNIMPLEMENTED opcode %02X (prefix %02X) at %04X\n",
