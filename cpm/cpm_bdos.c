@@ -70,6 +70,12 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
     case CPM_F_WRITE:    /* 21 - write sequential */
         return cpm_bdos_write_sequential(cpu, cpu->de);
 
+    case CPM_F_RANDRD:   /* 33 - random read */
+        return cpm_bdos_random_read(cpu, cpu->de);
+
+    case CPM_F_RANDWR:   /* 34 - random write */
+        return cpm_bdos_random_write(cpu, cpu->de);
+
     default:
         fprintf(stderr, "\n[BDOS] unimplemented function %d (C=%d)  DE=%04X\n",
                 func, func, cpu->de);

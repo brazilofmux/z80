@@ -93,6 +93,14 @@ static int get_file_slot_from_fcb(uint8_t *fcb)
     return slot;
 }
 
+/* Extract 24-bit random record number from FCB (offsets 33-35) */
+static uint32_t get_random_record(const uint8_t *fcb)
+{
+    return (uint32_t)fcb[33]
+         | ((uint32_t)fcb[34] << 8)
+         | ((uint32_t)fcb[35] << 16);
+}
+
 /* Very simple CP/M 8.3 pattern matcher.
  * Supports '*' in name or ext as "match anything".
  * '?' is treated as single-char wildcard.
@@ -269,6 +277,86 @@ int cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
     fcb[32] = (rec + 1) & 0x7F;
 
     /* Update record count in current extent (crude but helpful) */
+    if (fcb[15] < 0x80) fcb[15]++;
+
+    cpu->a = 0;
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Random Record Access (BDOS 33 / 34)                                */
+/* ------------------------------------------------------------------ */
+
+int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    uint8_t *fcb = &cpu->mem[fcb_addr];
+    int slot = get_file_slot_from_fcb(fcb);
+    if (slot < 0) {
+        cpu->a = 1; /* error */
+        return 1;
+    }
+
+    FILE *fp = open_files[slot].fp;
+    uint32_t rec = get_random_record(fcb);
+    long offset = (long)rec * 128;
+
+    if (fseek(fp, offset, SEEK_SET) != 0) {
+        cpu->a = 1;
+        return 1;
+    }
+
+    size_t n = fread(&cpu->mem[current_dma], 1, 128, fp);
+    if (n == 0) {
+        cpu->a = 1; /* EOF / record not written */
+        return 1;
+    }
+
+    /* Update sequential position so mixed seq/random works */
+    fcb[12] = rec >> 7;      /* extent */
+    fcb[32] = rec & 0x7F;    /* current record */
+
+    open_files[slot].logical_record = rec;
+
+    cpu->a = 0;
+    return 1;
+}
+
+int cpm_bdos_random_write(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    uint8_t *fcb = &cpu->mem[fcb_addr];
+    int slot = get_file_slot_from_fcb(fcb);
+    if (slot < 0) {
+        cpu->a = 1;
+        return 1;
+    }
+
+    FILE *fp = open_files[slot].fp;
+    uint32_t rec = get_random_record(fcb);
+    long offset = (long)rec * 128;
+
+    if (fseek(fp, offset, SEEK_SET) != 0) {
+        cpu->a = 2; /* disk full / seek error */
+        return 1;
+    }
+
+    uint8_t buf[128] = {0};
+    memcpy(buf, &cpu->mem[current_dma], 128);
+
+    size_t n = fwrite(buf, 1, 128, fp);
+    if (n != 128) {
+        cpu->a = 2;
+        return 1;
+    }
+
+    fflush(fp);
+
+    /* Update sequential fields */
+    fcb[12] = rec >> 7;
+    fcb[32] = rec & 0x7F;
+
+    open_files[slot].logical_record = rec;
+
+    /* crude record count update */
     if (fcb[15] < 0x80) fcb[15]++;
 
     cpu->a = 0;
