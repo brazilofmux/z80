@@ -21,6 +21,11 @@ static void enter_raw_mode(void) {
     tcgetattr(STDIN_FILENO, &orig_termios);
     struct termios raw = orig_termios;
     raw.c_lflag &= ~(ICANON | ECHO);
+    /* Pass keystrokes through verbatim: don't let the tty driver translate
+     * CR <-> NL. CP/M uses 0x0D as line terminator, and with ICRNL on,
+     * the ENTER key (which sends 0x0D) was being delivered to the guest
+     * as 0x0A, so CP/M-era programs like Zork ignored it. */
+    raw.c_iflag &= ~(ICRNL | INLCR | IGNCR | IXON);
     raw.c_cc[VMIN] = 1;     /* block until at least one character for CONIN */
     raw.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
