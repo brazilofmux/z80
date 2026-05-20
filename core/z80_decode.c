@@ -137,7 +137,9 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
 
         /* ALU A, (IX+d) */
         case 0x86: out->type = Z80_OP_ADD_A_HL_ind; out->reg1 = 6; return out->bytes;
+        case 0x8E: out->type = Z80_OP_ADC_A_HL_ind; out->reg1 = 6; return out->bytes;
         case 0x96: out->type = Z80_OP_SUB_A_HL_ind; out->reg1 = 6; return out->bytes;
+        case 0x9E: out->type = Z80_OP_SBC_A_HL_ind; out->reg1 = 6; return out->bytes;
         case 0xA6: out->type = Z80_OP_AND_A_HL_ind; out->reg1 = 6; return out->bytes;
         case 0xAE: out->type = Z80_OP_XOR_A_HL_ind; out->reg1 = 6; return out->bytes;
         case 0xB6: out->type = Z80_OP_OR_A_HL_ind;  out->reg1 = 6; return out->bytes;
@@ -275,7 +277,7 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
     case 0x3F: out->type = Z80_OP_CCF; break;
 
     /* 0x40-0x7F : LD r, r'  (including HALT at 0x76) */
-    case 0x76: /* HALT */ /* TODO */ break;
+    case 0x76: out->type = Z80_OP_HALT; break;
     default:
         if (op >= 0x40 && op <= 0x7F) {
             out->type = Z80_OP_LD_R_R;
@@ -283,12 +285,20 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
             out->reg2 = op & 7;
         } else if (op >= 0x80 && op <= 0x87) {
             out->type = Z80_OP_ADD_A_R; out->reg1 = op & 7;
+        } else if (op >= 0x88 && op <= 0x8F) {
+            out->type = Z80_OP_ADC_A_R; out->reg1 = op & 7;
         } else if (op == 0xC6) {
             out->type = Z80_OP_ADD_A_N; out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++;
+        } else if (op == 0xCE) {
+            out->type = Z80_OP_ADC_A_N; out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++;
         } else if (op >= 0x90 && op <= 0x97) {
             out->type = Z80_OP_SUB_A_R; out->reg1 = op & 7;
+        } else if (op >= 0x98 && op <= 0x9F) {
+            out->type = Z80_OP_SBC_A_R; out->reg1 = op & 7;
         } else if (op == 0xD6) {
             out->type = Z80_OP_SUB_A_N; out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++;
+        } else if (op == 0xDE) {
+            out->type = Z80_OP_SBC_A_N; out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++;
         } else if (op >= 0xA0 && op <= 0xA7) {
             out->type = Z80_OP_AND_A_R; out->reg1 = op & 7;
         } else if (op == 0xE6) {
@@ -326,7 +336,9 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
         out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
         out->bytes += 2; break;
     case 0xC5: out->type = Z80_OP_PUSH_RR; out->reg1 = RR_BC; break;
-    case 0xC6: /* already handled above */ break;
+    case 0xC6: /* ADD A, n */
+        out->type = Z80_OP_ADD_A_N;
+        out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;
     case 0xC7: out->type = Z80_OP_RST; out->imm8 = 0x00; break;
     case 0xC8: out->type = Z80_OP_RET_CC; out->cc = CC_Z; break;
     case 0xC9: out->type = Z80_OP_RET; break;
@@ -342,61 +354,107 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
         out->type = Z80_OP_CALL_NN;
         out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
         out->bytes += 2; break;
-    case 0xCE: /* ADC A, n */ /* TODO */ break;
+    case 0xCE: /* ADC A, n */
+        out->type = Z80_OP_ADC_A_N;
+        out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;
     case 0xCF: out->type = Z80_OP_RST; out->imm8 = 0x08; break;
 
     /* 0xD0-DF */
     case 0xD0: out->type = Z80_OP_RET_CC; out->cc = CC_NC; break;
     case 0xD1: out->type = Z80_OP_POP_RR; out->reg1 = RR_DE; break;
-    case 0xD2: out->type = Z80_OP_JP_CC_NN; out->cc = CC_NC; break;  /* JP NC, nn */
+    case 0xD2: /* JP NC, nn */
+        out->type = Z80_OP_JP_CC_NN; out->cc = CC_NC;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
     case 0xD3: /* OUT (n), A */
         out->type = Z80_OP_OUT_N_A;
         out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;
-    case 0xD4: /* CALL NC, nn */ break;
+    case 0xD4: /* CALL NC, nn */
+        out->type = Z80_OP_CALL_CC_NN; out->cc = CC_NC;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
     case 0xD5: out->type = Z80_OP_PUSH_RR; out->reg1 = RR_DE; break;
-    case 0xD6: /* SUB n - handled above */ break;
+    case 0xD6: /* SUB n */
+        out->type = Z80_OP_SUB_A_N;
+        out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;
     case 0xD7: out->type = Z80_OP_RST; out->imm8 = 0x10; break;
     case 0xD8: out->type = Z80_OP_RET_CC; out->cc = CC_C; break;
     case 0xD9: out->type = Z80_OP_EXX; break;
-    case 0xDA: out->type = Z80_OP_JP_CC_NN; out->cc = CC_C; break;  /* JP C, nn */
+    case 0xDA: /* JP C, nn */
+        out->type = Z80_OP_JP_CC_NN; out->cc = CC_C;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
     case 0xDB: /* IN A, (n) */
         out->type = Z80_OP_IN_A_N;
         out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;
-    case 0xDC: out->type = Z80_OP_CALL_CC_NN; out->cc = CC_C; break;  /* CALL C, nn */
-    case 0xDE: /* SBC A, n */ break;
+    case 0xDC: /* CALL C, nn */
+        out->type = Z80_OP_CALL_CC_NN; out->cc = CC_C;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
+    case 0xDE: /* SBC A, n */
+        out->type = Z80_OP_SBC_A_N;
+        out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;
     case 0xDF: out->type = Z80_OP_RST; out->imm8 = 0x18; break;
 
     /* 0xE0-EF */
     case 0xE0: out->type = Z80_OP_RET_CC; out->cc = CC_PO; break;
     case 0xE1: out->type = Z80_OP_POP_RR; out->reg1 = RR_HL; break;
-    case 0xE2: /* JP PO, nn */ break;
-    case 0xE3: /* EX (SP), HL */ /* TODO */ break;
-    case 0xE4: /* CALL PO, nn */ break;
+    case 0xE2: /* JP PO, nn */
+        out->type = Z80_OP_JP_CC_NN; out->cc = CC_PO;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
+    case 0xE3: out->type = Z80_OP_EX_SP_HL; break;
+    case 0xE4: /* CALL PO, nn */
+        out->type = Z80_OP_CALL_CC_NN; out->cc = CC_PO;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
     case 0xE5: out->type = Z80_OP_PUSH_RR; out->reg1 = RR_HL; break;
     case 0xE6: out->type = Z80_OP_AND_A_N; out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;  /* AND n */
     case 0xE7: out->type = Z80_OP_RST; out->imm8 = 0x20; break;
     case 0xE8: out->type = Z80_OP_RET_CC; out->cc = CC_PE; break;
     case 0xE9: out->type = Z80_OP_JP_HL; break;  /* JP (HL) */
-    case 0xEA: /* JP PE, nn */ break;
+    case 0xEA: /* JP PE, nn */
+        out->type = Z80_OP_JP_CC_NN; out->cc = CC_PE;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
     case 0xEB: out->type = Z80_OP_EX_DE_HL; break;
-    case 0xEC: /* CALL PE, nn */ break;
-    case 0xEE: /* XOR n - handled */ break;
+    case 0xEC: /* CALL PE, nn */
+        out->type = Z80_OP_CALL_CC_NN; out->cc = CC_PE;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
+    case 0xEE: /* XOR n */
+        out->type = Z80_OP_XOR_A_N;
+        out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;
     case 0xEF: out->type = Z80_OP_RST; out->imm8 = 0x28; break;
 
     /* 0xF0-FF */
     case 0xF0: out->type = Z80_OP_RET_CC; out->cc = CC_P; break;
     case 0xF1: out->type = Z80_OP_POP_RR; out->reg1 = RR_AF; break;
-    case 0xF2: /* JP P, nn */ break;
-    case 0xF3: /* DI */ /* TODO */ break;
-    case 0xF4: /* CALL P, nn */ break;
+    case 0xF2: /* JP P, nn */
+        out->type = Z80_OP_JP_CC_NN; out->cc = CC_P;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
+    case 0xF3: out->type = Z80_OP_DI; break;
+    case 0xF4: /* CALL P, nn */
+        out->type = Z80_OP_CALL_CC_NN; out->cc = CC_P;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
     case 0xF5: out->type = Z80_OP_PUSH_RR; out->reg1 = RR_AF; break;
-    case 0xF6: /* OR n - handled */ break;
+    case 0xF6: /* OR n */
+        out->type = Z80_OP_OR_A_N;
+        out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;
     case 0xF7: out->type = Z80_OP_RST; out->imm8 = 0x30; break;
     case 0xF8: out->type = Z80_OP_RET_CC; out->cc = CC_M; break;
     case 0xF9: out->type = Z80_OP_LD_SP_HL; break;
-    case 0xFA: /* JP M, nn */ break;
-    case 0xFB: /* EI */ /* TODO */ break;
-    case 0xFC: /* CALL M, nn */ break;
+    case 0xFA: /* JP M, nn */
+        out->type = Z80_OP_JP_CC_NN; out->cc = CC_M;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
+    case 0xFB: out->type = Z80_OP_EI; break;
+    case 0xFC: /* CALL M, nn */
+        out->type = Z80_OP_CALL_CC_NN; out->cc = CC_M;
+        out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
+        out->bytes += 2; break;
     case 0xFE: out->type = Z80_OP_CP_A_N; out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;  /* CP n */
     case 0xFF: out->type = Z80_OP_RST; out->imm8 = 0x38; break;
     }

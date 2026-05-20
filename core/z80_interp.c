@@ -366,6 +366,105 @@ int z80_step(z80_cpu_t *cpu) {
         }
         break;
 
+    case Z80_OP_ADC_A_R:
+    case Z80_OP_ADC_A_HL_ind:
+        {
+            uint8_t b = (dec.type == Z80_OP_ADC_A_HL_ind)
+                            ? read_reg8(cpu, 6, &dec)
+                            : read_reg8(cpu, dec.reg1, &dec);
+            uint8_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
+            uint16_t wide = (uint16_t)cpu->a + b + cin;
+            uint8_t res = (uint8_t)wide;
+            uint8_t f = 0;
+            if (res == 0) f |= Z80_FLAG_Z;
+            if (res & 0x80) f |= Z80_FLAG_S;
+            if (((cpu->a & 0xF) + (b & 0xF) + cin) > 0xF) f |= Z80_FLAG_H;
+            if (wide > 0xFF) f |= Z80_FLAG_C;
+            if (((cpu->a ^ b) & 0x80) == 0 && ((res ^ cpu->a) & 0x80)) f |= Z80_FLAG_PV;
+            cpu->f = f;
+            cpu->a = res;
+        }
+        break;
+
+    case Z80_OP_ADC_A_N:
+        {
+            uint8_t b = dec.imm8;
+            uint8_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
+            uint16_t wide = (uint16_t)cpu->a + b + cin;
+            uint8_t res = (uint8_t)wide;
+            uint8_t f = 0;
+            if (res == 0) f |= Z80_FLAG_Z;
+            if (res & 0x80) f |= Z80_FLAG_S;
+            if (((cpu->a & 0xF) + (b & 0xF) + cin) > 0xF) f |= Z80_FLAG_H;
+            if (wide > 0xFF) f |= Z80_FLAG_C;
+            if (((cpu->a ^ b) & 0x80) == 0 && ((res ^ cpu->a) & 0x80)) f |= Z80_FLAG_PV;
+            cpu->f = f;
+            cpu->a = res;
+        }
+        break;
+
+    case Z80_OP_SBC_A_R:
+    case Z80_OP_SBC_A_HL_ind:
+        {
+            uint8_t b = (dec.type == Z80_OP_SBC_A_HL_ind)
+                            ? read_reg8(cpu, 6, &dec)
+                            : read_reg8(cpu, dec.reg1, &dec);
+            uint8_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
+            int wide = (int)cpu->a - b - cin;
+            uint8_t res = (uint8_t)wide;
+            uint8_t f = Z80_FLAG_N;
+            if (res == 0) f |= Z80_FLAG_Z;
+            if (res & 0x80) f |= Z80_FLAG_S;
+            if (((cpu->a & 0xF) - (b & 0xF) - cin) & 0x10) f |= Z80_FLAG_H;
+            if (wide < 0) f |= Z80_FLAG_C;
+            if (((cpu->a ^ b) & 0x80) && ((res ^ cpu->a) & 0x80)) f |= Z80_FLAG_PV;
+            cpu->f = f;
+            cpu->a = res;
+        }
+        break;
+
+    case Z80_OP_SBC_A_N:
+        {
+            uint8_t b = dec.imm8;
+            uint8_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
+            int wide = (int)cpu->a - b - cin;
+            uint8_t res = (uint8_t)wide;
+            uint8_t f = Z80_FLAG_N;
+            if (res == 0) f |= Z80_FLAG_Z;
+            if (res & 0x80) f |= Z80_FLAG_S;
+            if (((cpu->a & 0xF) - (b & 0xF) - cin) & 0x10) f |= Z80_FLAG_H;
+            if (wide < 0) f |= Z80_FLAG_C;
+            if (((cpu->a ^ b) & 0x80) && ((res ^ cpu->a) & 0x80)) f |= Z80_FLAG_PV;
+            cpu->f = f;
+            cpu->a = res;
+        }
+        break;
+
+    case Z80_OP_EX_SP_HL:
+        {
+            uint8_t lo = cpu->mem[cpu->sp];
+            uint8_t hi = cpu->mem[(cpu->sp + 1) & 0xFFFF];
+            cpu->mem[cpu->sp] = cpu->l;
+            cpu->mem[(cpu->sp + 1) & 0xFFFF] = cpu->h;
+            cpu->l = lo;
+            cpu->h = hi;
+        }
+        break;
+
+    case Z80_OP_DI:
+        cpu->iff1 = 0; cpu->iff2 = 0;
+        break;
+
+    case Z80_OP_EI:
+        cpu->iff1 = 1; cpu->iff2 = 1;
+        break;
+
+    case Z80_OP_HALT:
+        /* No interrupt sources implemented — treat as terminate so we
+         * don't spin forever, but loud so we notice. */
+        fprintf(stderr, "z80_step: HALT at %04X (no IRQ system yet) — stopping\n", old_pc);
+        return -1;
+
     case Z80_OP_SUB_A_N:
         {
             uint8_t res = cpu->a - dec.imm8;

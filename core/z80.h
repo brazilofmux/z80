@@ -217,6 +217,20 @@ typedef enum {
     /* Half index registers (IXH/IXL, IYH/IYL) */
     Z80_OP_LD_A_IXH,
     Z80_OP_LD_A_IXL,
+
+    /* ADC / SBC with carry-in */
+    Z80_OP_ADC_A_R,
+    Z80_OP_ADC_A_N,
+    Z80_OP_ADC_A_HL_ind,
+    Z80_OP_SBC_A_R,
+    Z80_OP_SBC_A_N,
+    Z80_OP_SBC_A_HL_ind,
+
+    /* Miscellaneous */
+    Z80_OP_EX_SP_HL,    /* EX (SP), HL */
+    Z80_OP_DI,
+    Z80_OP_EI,
+    Z80_OP_HALT,
 } z80_op_type;
 
 typedef struct {
