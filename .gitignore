@@ -6,6 +6,7 @@
 z80-monster
 tools/mkhello
 tools/mkblock
+tools/mkcb
 
 # Future generated test binaries
 tests/*.com
