@@ -113,6 +113,7 @@ uint8_t cpm_constat(void);   /* returns 0 or 0xFF */
 /* Public disk functions */
 void cpm_disk_init(void);
 void cpm_disk_install_defaults(z80_cpu_t *cpu);
+void cpm_set_a_root(const char *path);
 void cpm_set_dma(uint16_t addr);
 int  cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr);
 int  cpm_bdos_close_file(z80_cpu_t *cpu, uint16_t fcb_addr);

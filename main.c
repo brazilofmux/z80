@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <termios.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <limits.h>
 
 static struct termios orig_termios;
 static int term_raw = 0;
@@ -45,8 +47,16 @@ static void usage(const char *prog) {
 
 int main(int argc, char **argv) {
     int show_stats = 0;
+    const char *disk_root = NULL;
     const char *prog = NULL;
 
+    /* New flexible argument handling for fast real-binary iteration:
+     *   ./z80-monster
+     *   ./z80-monster foo.com
+     *   ./z80-monster disks/zork1/
+     *   ./z80-monster disks/zork1/ zork1.com
+     *   ./z80-monster disks/zork1/zork1.com
+     */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             usage(argv[0]);
@@ -54,21 +64,82 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-s") == 0) {
             show_stats = 1;
         } else if (argv[i][0] != '-') {
-            prog = argv[i];
+            if (!disk_root && !prog) {
+                /* First non-option argument */
+                if (strstr(argv[i], ".com") || strstr(argv[i], ".COM")) {
+                    prog = argv[i];
+                } else {
+                    /* Treat as directory / disk root */
+                    disk_root = argv[i];
+                }
+            } else if (disk_root && !prog) {
+                prog = argv[i];
+            }
         }
     }
 
-    if (!prog) {
+    if (!prog && !disk_root) {
         print_banner();
         usage(argv[0]);
         return 0;
     }
 
+    /* If user gave us a .com with a path, use its directory as the disk root */
+    char effective_root[PATH_MAX] = {0};
+    if (prog) {
+        /* Try to extract directory from the program path */
+        char *last_slash = strrchr((char*)prog, '/');
+        if (last_slash) {
+            size_t len = last_slash - prog;
+            if (len < sizeof(effective_root)) {
+                strncpy(effective_root, prog, len);
+                effective_root[len] = 0;
+            }
+        }
+    }
+
+    const char *root_to_use = disk_root ? disk_root : (effective_root[0] ? effective_root : NULL);
+
+    if (root_to_use) {
+        cpm_set_a_root(root_to_use);
+        /* Also chdir so relative paths feel natural */
+        if (chdir(root_to_use) != 0) {
+            fprintf(stderr, "Warning: could not chdir into '%s'\n", root_to_use);
+        }
+    }
+
+    /* If no explicit program was given but we have a disk root, try to find one */
+    char auto_prog[PATH_MAX] = {0};
+    if (!prog && root_to_use) {
+        /* Very simple heuristic: look for the first .com in the directory */
+        DIR *d = opendir(".");
+        if (d) {
+            struct dirent *ent;
+            while ((ent = readdir(d))) {
+                size_t len = strlen(ent->d_name);
+                if (len > 4 &&
+                    (strcasecmp(ent->d_name + len - 4, ".com") == 0)) {
+                    strncpy(auto_prog, ent->d_name, sizeof(auto_prog) - 1);
+                    prog = auto_prog;
+                    break;
+                }
+            }
+            closedir(d);
+        }
+    }
+
+    const char *final_prog = prog ? prog : auto_prog;
+
+    if (!final_prog || !*final_prog) {
+        fprintf(stderr, "No .com program specified or found in '%s'\n", root_to_use ? root_to_use : ".");
+        return 1;
+    }
+
     z80_cpu_t cpu;
     z80_cpu_init(&cpu);
 
-    if (cpm_load_com(&cpu, prog) != 0) {
-        fprintf(stderr, "Failed to load %s\n", prog);
+    if (cpm_load_com(&cpu, final_prog) != 0) {
+        fprintf(stderr, "Failed to load %s\n", final_prog);
         return 1;
     }
 

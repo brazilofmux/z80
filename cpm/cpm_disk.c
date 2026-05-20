@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <limits.h>
 
 #define MAX_OPEN_FILES  8
 
@@ -24,6 +25,13 @@ typedef struct {
 
 static uint16_t current_dma = CPM_DEFAULT_DMA;
 static open_file_t open_files[MAX_OPEN_FILES];
+
+static void make_host_path(const char *name, char *out, size_t outlen);   /* forward decl */
+
+/* Drive A: root directory on the host.
+ * If empty, we use the current working directory (original behavior).
+ */
+static char a_root[PATH_MAX] = {0};
 
 /* Simple search context for BDOS 17/18 (Search First/Next).
  * CP/M only supports one active search at a time per process.
@@ -161,6 +169,7 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     FILE *fp;
 
     fcb_to_host_name(fcb, host_name, sizeof(host_name));
+    make_host_path(host_name, host_name, sizeof(host_name));
 
     fp = fopen(host_name, "rb");
     if (!fp) {
@@ -377,6 +386,7 @@ int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     FILE *fp;
 
     fcb_to_host_name(fcb, host_name, sizeof(host_name));
+    make_host_path(host_name, host_name, sizeof(host_name));
 
     /* Create/truncate the file */
     fp = fopen(host_name, "wb");
@@ -455,7 +465,11 @@ int cpm_bdos_search_first(z80_cpu_t *cpu, uint16_t fcb_addr)
     fcb_to_host_name(fcb, pattern, sizeof(pattern));
     strncpy(search_pattern, pattern, sizeof(search_pattern));
 
-    search_dir = opendir(".");
+    {
+        char dirpath[PATH_MAX];
+        make_host_path(".", dirpath, sizeof(dirpath));
+        search_dir = opendir(dirpath);
+    }
     if (!search_dir) {
         cpu->a = 0xFF;
         return 1;
@@ -514,4 +528,26 @@ void cpm_disk_install_defaults(z80_cpu_t *cpu)
 {
     (void)cpu;
     current_dma = CPM_DEFAULT_DMA;
+}
+
+/* Set the host directory that will be used as CP/M drive A: */
+void cpm_set_a_root(const char *path)
+{
+    if (!path || !*path) {
+        a_root[0] = 0;
+        return;
+    }
+    strncpy(a_root, path, sizeof(a_root) - 1);
+    a_root[sizeof(a_root) - 1] = 0;
+}
+
+/* Helper: turn a relative host name into a path under the A: root */
+static void make_host_path(const char *name, char *out, size_t outlen)
+{
+    if (a_root[0]) {
+        snprintf(out, outlen, "%s/%s", a_root, name);
+    } else {
+        strncpy(out, name, outlen);
+        out[outlen - 1] = 0;
+    }
 }
