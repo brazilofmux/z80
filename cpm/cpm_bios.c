@@ -15,6 +15,33 @@
 #include <termios.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <string.h>
+
+/* Simple input queue to make CONST + CONIN / BDOS 6 (0xFF) polling reliable.
+ * Prevents races where a character arrives between the poll and the read. */
+#define INPUT_QUEUE_SIZE 32
+static unsigned char input_queue[INPUT_QUEUE_SIZE];
+static int q_head = 0;
+static int q_tail = 0;
+
+static int queue_has_data(void) {
+    return q_head != q_tail;
+}
+
+static void queue_push(unsigned char ch) {
+    int next = (q_head + 1) % INPUT_QUEUE_SIZE;
+    if (next != q_tail) {           /* drop oldest if full (rare) */
+        input_queue[q_head] = ch;
+        q_head = next;
+    }
+}
+
+static unsigned char queue_pop(void) {
+    if (q_head == q_tail) return 0;
+    unsigned char ch = input_queue[q_tail];
+    q_tail = (q_tail + 1) % INPUT_QUEUE_SIZE;
+    return ch;
+}
 
 /* Forward decls for console helpers (we can share logic with BDOS later) */
 /* (BIOS wrappers removed — we now call the unified cpm_* functions directly) */
@@ -125,6 +152,11 @@ void cpm_conout(uint8_t ch) {
 /* CONIN — blocking read of one character.
  * With raw mode + VMIN=1 this works nicely. */
 uint8_t cpm_conin(void) {
+    /* Drain any pre-fetched characters first (makes polling + CONIN reliable) */
+    if (queue_has_data()) {
+        return queue_pop();
+    }
+
     unsigned char ch;
     ssize_t n = read(STDIN_FILENO, &ch, 1);
     if (n <= 0) {
@@ -136,19 +168,110 @@ uint8_t cpm_conin(void) {
 /* CONST — console status (non-blocking "is a key available?").
  * Returns 0xFF if ready, 0 if not. */
 uint8_t cpm_constat(void) {
+    /* First, anything already queued? */
+    if (queue_has_data()) {
+        return 0xFF;
+    }
+
     fd_set rfds;
-    struct timeval tv = {0, 0};   /* zero timeout = poll */
+    struct timeval tv = {0, 0};
 
     FD_ZERO(&rfds);
     FD_SET(STDIN_FILENO, &rfds);
 
     int ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
     if (ret > 0 && FD_ISSET(STDIN_FILENO, &rfds)) {
-        return 0xFF;   /* character ready */
+        /* Pre-read the character into the queue so the next CONIN gets it
+         * without another syscall/race. */
+        unsigned char ch;
+        ssize_t n = read(STDIN_FILENO, &ch, 1);
+        if (n > 0) {
+            queue_push(ch);
+            return 0xFF;
+        }
     }
+
+    /* Small host delay when no input is available.
+     * This prevents tight guest polling loops (very common in CP/M loaders
+     * and games) from spamming output like "Load Game Disk..." thousands
+     * of times per second. 1ms is usually enough to make it feel normal
+     * while still being very responsive. */
+    usleep(1000);   /* 1ms yield */
+
     return 0;
 }
 
 /* --- BIOS wrappers (these are what the BIOS dispatch calls) --- */
 
 /* BIOS entry points now call the unified cpm_* functions directly in the dispatch */
+
+/* ========================================================================
+ * BDOS 10 - Read Console Buffer (with line editing)
+ * Buffer at DE:
+ *   [0] = max chars (input)
+ *   [1] = chars actually read (output)
+ *   [2..] = the line (CR not stored)
+ * ======================================================================== */
+void cpm_read_console_buffer(z80_cpu_t *cpu, uint16_t de) {
+    uint8_t *buf = &cpu->mem[de];
+    uint8_t max = buf[0];
+    if (max == 0) {
+        buf[1] = 0;
+        cpu->a = 0;
+        return;
+    }
+
+    /* Aggressively clean the default low-memory buffer area.
+     * The Zork loader (and many other Infocom titles) do their initial
+     * header verification random reads into the default DMA at 0x80.
+     * This leaves story file data sitting in what the game later uses
+     * for its command input buffer. The result is exactly the "flood
+     * of �" right after the first `>` prompt.
+     *
+     * Zeroing here gives the game a clean slate for the first command
+     * without affecting later, well-behaved DMA usage.
+     */
+    memset(&cpu->mem[0x80], 0, 128);
+
+    uint8_t len = 0;
+    buf[1] = 0;
+
+    for (;;) {
+        uint8_t ch = cpm_conin();
+
+        if (ch == '\r' || ch == '\n') {
+            cpm_conout('\r');
+            cpm_conout('\n');
+            break;
+        } else if (ch == 0x08 || ch == 0x7F) {   /* BS / DEL */
+            if (len > 0) {
+                len--;
+                cpm_conout('\b');
+                cpm_conout(' ');
+                cpm_conout('\b');
+            }
+        } else if (ch == 0x15) {                 /* ^U - kill line */
+            while (len > 0) {
+                cpm_conout('\b');
+                cpm_conout(' ');
+                cpm_conout('\b');
+                len--;
+            }
+        } else if (ch == 0x12) {                 /* ^R - retype line (nice to have) */
+            cpm_conout('#');
+            cpm_conout('\r');
+            cpm_conout('\n');
+            for (uint8_t i = 0; i < len; i++) {
+                cpm_conout(buf[2 + i]);
+            }
+        } else if (ch >= 0x20 && ch <= 0x7E && len < max) {
+            buf[2 + len] = ch;
+            len++;
+            cpm_conout(ch);
+        }
+        /* ignore other control characters */
+    }
+
+    buf[1] = len;
+    cpu->a = 0;
+}

@@ -27,6 +27,15 @@ static uint16_t current_dma = CPM_DEFAULT_DMA;
 static open_file_t open_files[MAX_OPEN_FILES];
 static uint16_t open_fcb_addr[MAX_OPEN_FILES];   /* guest FCB address that owns each slot (0 = free) */
 
+/* Private bounce buffer for all disk I/O.
+ * We always do the actual fread/fwrite into this buffer first, then
+ * copy to/from the guest's current_dma. This prevents large amounts
+ * of file data from permanently sitting in whatever memory the game
+ * currently has mapped at its DMA address (a very common source of
+ * "first command prompt is full of garbage" with Infocom titles).
+ */
+static uint8_t disk_io_buf[128];
+
 static void make_host_path(const char *name, char *out, size_t outlen);   /* forward decl */
 
 /* Drive A: root directory on the host.
@@ -257,7 +266,10 @@ int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
         return 1;
     }
 
-    size_t n = fread(&cpu->mem[current_dma], 1, 128, fp);
+    size_t n = fread(disk_io_buf, 1, 128, fp);
+    if (n > 0) {
+        memcpy(&cpu->mem[current_dma], disk_io_buf, n);
+    }
     if (n == 0) {
         cpu->a = 1; /* EOF */
         return 1;
@@ -294,10 +306,9 @@ int cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
     }
 
     /* Write 128 bytes from DMA. Pad with zeros if we only have partial data (rare). */
-    uint8_t buf[128] = {0};
-    memcpy(buf, &cpu->mem[current_dma], 128);
+    memcpy(disk_io_buf, &cpu->mem[current_dma], 128);
 
-    size_t n = fwrite(buf, 1, 128, fp);
+    size_t n = fwrite(disk_io_buf, 1, 128, fp);
     if (n != 128) {
         cpu->a = 1;
         return 1;
@@ -340,7 +351,10 @@ int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
         return 1;
     }
 
-    size_t n = fread(&cpu->mem[current_dma], 1, 128, fp);
+    size_t n = fread(disk_io_buf, 1, 128, fp);
+    if (n > 0) {
+        memcpy(&cpu->mem[current_dma], disk_io_buf, n);
+    }
     if (n == 0) {
         fprintf(stderr, "  [random read] rec=%u returned EOF (A=1)\n", rec);
         cpu->a = 1; /* EOF / record not written */
@@ -388,10 +402,9 @@ int cpm_bdos_random_write(z80_cpu_t *cpu, uint16_t fcb_addr)
         return 1;
     }
 
-    uint8_t buf[128] = {0};
-    memcpy(buf, &cpu->mem[current_dma], 128);
+    memcpy(disk_io_buf, &cpu->mem[current_dma], 128);
 
-    size_t n = fwrite(buf, 1, 128, fp);
+    size_t n = fwrite(disk_io_buf, 1, 128, fp);
     if (n != 128) {
         fprintf(stderr, "  [random write] rec=%u short write\n", rec);
         cpu->a = 2;

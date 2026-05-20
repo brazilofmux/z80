@@ -106,6 +106,9 @@ void    cpm_conout(uint8_t ch);
 uint8_t cpm_conin(void);
 uint8_t cpm_constat(void);   /* returns 0 or 0xFF */
 
+/* BDOS 10 line input (implemented in bios layer for sharing) */
+void cpm_read_console_buffer(z80_cpu_t *cpu, uint16_t de);
+
 /* Disk / FCB support */
 #define CPM_DEFAULT_DMA   0x0080
 #define CPM_FCB_SIZE      36

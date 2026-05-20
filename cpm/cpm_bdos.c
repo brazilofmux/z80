@@ -58,14 +58,29 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
         return 1;
 
     case 6:             /* 6 - Direct Console I/O (very common) */
-        if (cpu->de == 0x00FF) {
-            /* Read char if available (non-blocking) */
+        /* CP/M dispatches on E only — D is ignored. The old check
+         * `cpu->de == 0x00FF` required D==0, which Zork (and many other
+         * programs) don't bother to clear. The result was that every
+         * E=0xFF read poll fell into the else branch and wrote 0xFF to
+         * the console — exactly the "flood of �" right after the prompt. */
+        if (cpu->e == 0xFF) {
+            /* Read char if available (non-blocking, no echo) */
             cpu->a = cpm_constat() ? cpm_conin() : 0;
+        } else if (cpu->e == 0xFE) {
+            /* CP/M 3 status: 0xFF if key ready, 0 otherwise */
+            cpu->a = cpm_constat();
+        } else if (cpu->e == 0xFD) {
+            /* CP/M 3 read-without-status: blocking read, no echo */
+            cpu->a = cpm_conin();
         } else {
             /* Write char in E */
             cpm_conout(cpu->e);
             cpu->a = cpu->e;   /* some programs expect echo in A */
         }
+        return 1;
+
+    case CPM_F_RDSTR:   /* 10 - Read console buffer (the one real programs use) */
+        cpm_read_console_buffer(cpu, cpu->de);
         return 1;
 
     case CPM_F_VERSION: /* 12 */
