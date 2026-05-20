@@ -111,6 +111,13 @@ tests/fileio.com: tools/mkfileio
 tools/mkfileio: tools/mkfileio.c
 	$(CC) -o $@ $<
 
+tests/random.com: tools/mkrandom
+	@mkdir -p tests
+	./tools/mkrandom
+
+tools/mkrandom: tools/mkrandom.c
+	$(CC) -o $@ $<
+
 # Quick sanity: does it even compile and say hello?
 smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/console.com
 	@echo "=== Smoke test ==="
