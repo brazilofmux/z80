@@ -197,6 +197,8 @@ typedef enum {
     Z80_OP_RLA,
     Z80_OP_RRA,
 
+    Z80_OP_JP_HL,   /* JP (HL) */
+
     /* IX/IY indexed memory forms (reused where possible) */
     Z80_OP_LD_A_HL_ind,
     Z80_OP_LD_HL_A_ind,

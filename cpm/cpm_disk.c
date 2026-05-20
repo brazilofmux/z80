@@ -25,6 +25,7 @@ typedef struct {
 
 static uint16_t current_dma = CPM_DEFAULT_DMA;
 static open_file_t open_files[MAX_OPEN_FILES];
+static uint16_t open_fcb_addr[MAX_OPEN_FILES];   /* guest FCB address that owns each slot (0 = free) */
 
 static void make_host_path(const char *name, char *out, size_t outlen);   /* forward decl */
 
@@ -44,6 +45,7 @@ static char search_pattern[16];   /* 8.3 pattern from FCB */
 void cpm_disk_init(void)
 {
     memset(open_files, 0, sizeof(open_files));
+    memset(open_fcb_addr, 0, sizeof(open_fcb_addr));
     current_dma = CPM_DEFAULT_DMA;
 }
 
@@ -92,13 +94,16 @@ static long logical_record_to_offset(uint16_t rec)
     return (long)rec * 128;
 }
 
-/* Get or create a file slot from an FCB (looks at the drive byte we stashed) */
-static int get_file_slot_from_fcb(uint8_t *fcb)
+/* Look up open slot by the guest FCB address (the value passed in DE to the BDOS call).
+ * This is much more compatible than abusing the drive byte in the FCB.
+ */
+static int get_file_slot_from_fcb(uint16_t fcb_addr)
 {
-    int slot = fcb[0] & 0x7F;
-    if (slot >= MAX_OPEN_FILES || open_files[slot].fp == NULL)
-        return -1;
-    return slot;
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        if (open_files[i].fp != NULL && open_fcb_addr[i] == fcb_addr)
+            return i;
+    }
+    return -1;
 }
 
 /* Extract 24-bit random record number from FCB (offsets 33-35) */
@@ -168,6 +173,9 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     char host_name[64];
     FILE *fp;
 
+    /* No special casing — let the program's own FCB at 5C (usually "ZORK1.DAT")
+     * open normally. The menu stub constructs this FCB itself. */
+
     fcb_to_host_name(fcb, host_name, sizeof(host_name));
     {
         char full[PATH_MAX];
@@ -191,26 +199,39 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 
     open_files[slot].fp = fp;
     memcpy(open_files[slot].fcb_copy, fcb, CPM_FCB_SIZE);
+    open_fcb_addr[slot] = fcb_addr;   /* remember which guest FCB owns this slot */
 
-    /* Initialize logical record from FCB */
+    /* Compute real record count from host file size and update FCB[15] (RC).
+     * Many .COM data loaders (Infocom etc.) look at this after OPEN. */
+    struct stat st;
+    uint8_t rc = 0;
+    if (fstat(fileno(fp), &st) == 0) {
+        long total_recs = (st.st_size + 127L) / 128L;
+        if (total_recs > 0x80) total_recs = 0x80; /* one extent max for simple case */
+        rc = (uint8_t)total_recs;
+    }
+    fcb[15] = rc;
+
+    /* Initialize logical record from FCB (program may have set extent/CR) */
     uint8_t extent = fcb[12];
     uint8_t cr     = fcb[32];
     open_files[slot].logical_record = ((uint16_t)extent << 7) + cr;
 
     cpu->a = 0;
-    fcb[0] = (uint8_t)(slot | 0x80);
+    /* Do NOT smash fcb[0] — leave the original drive code alone.
+     * We track ownership via the separate open_fcb_addr table. */
 
     return 1;
 }
 
 int cpm_bdos_close_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
-    uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = fcb[0] & 0x7F;
+    int slot = get_file_slot_from_fcb(fcb_addr);
 
-    if (slot < MAX_OPEN_FILES && open_files[slot].fp) {
+    if (slot >= 0 && open_files[slot].fp) {
         fclose(open_files[slot].fp);
         open_files[slot].fp = NULL;
+        open_fcb_addr[slot] = 0;
     }
 
     cpu->a = 0;
@@ -220,7 +241,7 @@ int cpm_bdos_close_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = get_file_slot_from_fcb(fcb);
+    int slot = get_file_slot_from_fcb(fcb_addr);
     if (slot < 0) {
         cpu->a = 1;
         return 1;
@@ -256,7 +277,7 @@ int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = get_file_slot_from_fcb(fcb);
+    int slot = get_file_slot_from_fcb(fcb_addr);
     if (slot < 0) {
         cpu->a = 1;
         return 1;
@@ -304,7 +325,7 @@ int cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = get_file_slot_from_fcb(fcb);
+    int slot = get_file_slot_from_fcb(fcb_addr);
     if (slot < 0) {
         cpu->a = 1; /* error */
         return 1;
@@ -321,8 +342,22 @@ int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
 
     size_t n = fread(&cpu->mem[current_dma], 1, 128, fp);
     if (n == 0) {
+        fprintf(stderr, "  [random read] rec=%u returned EOF (A=1)\n", rec);
         cpu->a = 1; /* EOF / record not written */
         return 1;
+    }
+    if (n < 128) {
+        fprintf(stderr, "  [random read] rec=%u short read (%zu bytes)\n", rec, n);
+    }
+
+    /* One-time diagnostic: show the header the game sees on the very first record */
+    static int first_rec_dumped = 0;
+    if (!first_rec_dumped && rec == 0) {
+        first_rec_dumped = 1;
+        fprintf(stderr, "  [Zork header @DMA] ");
+        for (int i = 0; i < 16; i++)
+            fprintf(stderr, "%02X ", cpu->mem[current_dma + i]);
+        fprintf(stderr, "\n");
     }
 
     /* Update sequential position so mixed seq/random works */
@@ -338,7 +373,7 @@ int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_random_write(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = get_file_slot_from_fcb(fcb);
+    int slot = get_file_slot_from_fcb(fcb_addr);
     if (slot < 0) {
         cpu->a = 1;
         return 1;
@@ -358,6 +393,7 @@ int cpm_bdos_random_write(z80_cpu_t *cpu, uint16_t fcb_addr)
 
     size_t n = fwrite(buf, 1, 128, fp);
     if (n != 128) {
+        fprintf(stderr, "  [random write] rec=%u short write\n", rec);
         cpu->a = 2;
         return 1;
     }
@@ -414,6 +450,7 @@ int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 
     open_files[slot].fp = fp;
     memcpy(open_files[slot].fcb_copy, fcb, CPM_FCB_SIZE);
+    open_fcb_addr[slot] = fcb_addr;
     open_files[slot].logical_record = 0;
 
     /* Zero out extent/CR in the FCB copy for a fresh file */
@@ -422,7 +459,7 @@ int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     fcb[32] = 0;   /* current record */
 
     cpu->a = 0;
-    fcb[0] = (uint8_t)(slot | 0x80);
+    /* leave original drive byte in fcb[0] */
 
     return 1;
 }

@@ -348,7 +348,7 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
     /* 0xD0-DF */
     case 0xD0: out->type = Z80_OP_RET_CC; out->cc = CC_NC; break;
     case 0xD1: out->type = Z80_OP_POP_RR; out->reg1 = RR_DE; break;
-    case 0xD2: /* JP NC, nn */ /* TODO pattern */ break;
+    case 0xD2: out->type = Z80_OP_JP_CC_NN; out->cc = CC_NC; break;  /* JP NC, nn */
     case 0xD3: /* OUT (n), A */
         out->type = Z80_OP_OUT_N_A;
         out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;
@@ -376,7 +376,7 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
     case 0xE6: out->type = Z80_OP_AND_A_N; out->imm8 = mem[(pc+1)&0xFFFF]; out->bytes++; break;  /* AND n */
     case 0xE7: out->type = Z80_OP_RST; out->imm8 = 0x20; break;
     case 0xE8: out->type = Z80_OP_RET_CC; out->cc = CC_PE; break;
-    case 0xE9: /* JP (HL) */ /* TODO */ break;
+    case 0xE9: out->type = Z80_OP_JP_HL; break;  /* JP (HL) */
     case 0xEA: /* JP PE, nn */ break;
     case 0xEB: out->type = Z80_OP_EX_DE_HL; break;
     case 0xEC: /* CALL PE, nn */ break;

@@ -11,6 +11,21 @@
 int cpm_bdos_dispatch(z80_cpu_t *cpu) {
     uint8_t func = cpu->c;
 
+    /* Light startup logging to help bring-up of real binaries (first ~30 calls) */
+    static int early_calls = 0;
+    if (early_calls < 30) {
+        early_calls++;
+        if (func == 33 || func == 34) {
+            /* Dump the random record the game is asking for */
+            uint8_t *fcb = &cpu->mem[cpu->de];
+            uint32_t rec = (uint32_t)fcb[33] | ((uint32_t)fcb[34]<<8) | ((uint32_t)fcb[35]<<16);
+            fprintf(stderr, "[BDOS #%d] func=%d (random %s) DE=%04X rec=%u (0x%06X)\n",
+                    early_calls, func, (func==33?"read":"write"), cpu->de, rec, rec);
+        } else {
+            fprintf(stderr, "[BDOS #%d] func=%d DE=%04X\n", early_calls, func, cpu->de);
+        }
+    }
+
     switch (func) {
     case CPM_F_WBOOT:   /* 0 - warm boot / exit */
         /* Program wants to return to CCP or terminate */
@@ -66,6 +81,12 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
         cpu->a = 0;
         return 1;
 
+    case CPM_F_RESET:   /* 13 - Reset Disk System (very common at startup) */
+        cpm_disk_init();
+        cpm_set_dma(CPM_DEFAULT_DMA);
+        cpu->a = 0;
+        return 1;
+
     case CPM_F_SETDMA:   /* 26 */
         return cpm_bdos_set_dma(cpu);
 
@@ -97,9 +118,11 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
         return cpm_bdos_random_write(cpu, cpu->de);
 
     default:
-        fprintf(stderr, "\n[BDOS] unimplemented function %d (C=%d)  DE=%04X\n",
+        /* Many real .COMs call functions we don't care about yet (Reset, Get DPB,
+         * Login Vector, Read Buffer, etc.). Log it but don't kill the program. */
+        fprintf(stderr, "[BDOS] unimplemented function %d (C=%d) DE=%04X — continuing\n",
                 func, func, cpu->de);
-        /* For development, treat unknown BDOS calls as fatal so we notice */
-        return 0;
+        cpu->a = 0;
+        return 1;   /* continue execution */
     }
 }

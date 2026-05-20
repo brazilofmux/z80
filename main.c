@@ -137,6 +137,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* Helpful for the common "just give me the directory" usage */
+    if (disk_root && !strstr(final_prog, "/")) {
+        fprintf(stderr, "Running %s from disk image '%s'\n", final_prog, disk_root);
+    }
+
     z80_cpu_t cpu;
     z80_cpu_init(&cpu);
 
@@ -153,6 +158,8 @@ int main(int argc, char **argv) {
         /* Direct termination conditions (very common in real .COMs) */
         if (cpu.pc == 0 && cpu.insn_count > 4) {
             /* Classic CP/M termination: JP 0, RET to 0 on stack, etc. */
+            fprintf(stderr, "[exit] PC=0000 after %llu insns (RET/JP 0 warmboot)\n",
+                    (unsigned long long)cpu.insn_count);
             break;
         }
 
@@ -163,10 +170,12 @@ int main(int argc, char **argv) {
         }
         if (rc > 0) {
             /* Clean CP/M exit via BDOS 0 / WBOOT / BIOS WBOOT */
+            fprintf(stderr, "[exit] BDOS/BIOS warmboot after %llu insns (C=%02X)\n",
+                    (unsigned long long)cpu.insn_count, cpu.c);
             break;
         }
-        if (cpu.insn_count > 500000000ULL) {
-            fprintf(stderr, "Safety limit (500M insns) reached — possible infinite loop\n");
+        if (cpu.insn_count > 2000000000ULL) {
+            fprintf(stderr, "Safety limit (2B insns) reached — possible infinite loop or very long interactive wait\n");
             break;
         }
     }

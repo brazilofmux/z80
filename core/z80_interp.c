@@ -427,11 +427,50 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_JP_NN:
         cpu->pc = dec.imm16;
+        if (cpu->pc == CPM_BDOS_ENTRY) {
+            int cont = cpm_bdos_dispatch(cpu);
+            if (!cont) return 1;
+            cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
+            cpu->sp = (cpu->sp + 2) & 0xFFFF;
+        } else if (cpu->pc >= CPM_BIOS_BASE && cpu->pc < CPM_BIOS_BASE + 0x80) {
+            int cont = cpm_bios_dispatch(cpu);
+            if (!cont) return 1;
+            cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
+            cpu->sp = (cpu->sp + 2) & 0xFFFF;
+        }
         break;
 
     case Z80_OP_JP_CC_NN:
-        if (cond_true(cpu, dec.cc))
+        if (cond_true(cpu, dec.cc)) {
             cpu->pc = dec.imm16;
+            if (cpu->pc == CPM_BDOS_ENTRY) {
+                int cont = cpm_bdos_dispatch(cpu);
+                if (!cont) return 1;
+                cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
+                cpu->sp = (cpu->sp + 2) & 0xFFFF;
+            } else if (cpu->pc >= CPM_BIOS_BASE && cpu->pc < CPM_BIOS_BASE + 0x80) {
+                int cont = cpm_bios_dispatch(cpu);
+                if (!cont) return 1;
+                cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
+                cpu->sp = (cpu->sp + 2) & 0xFFFF;
+            }
+        }
+        break;
+
+    case Z80_OP_JP_HL:
+        cpu->pc = cpu->hl;
+        /* CP/M vector indirection (BDOS at 0005 or BIOS via 0001) */
+        if (cpu->pc == CPM_BDOS_ENTRY) {
+            int cont = cpm_bdos_dispatch(cpu);
+            if (!cont) return 1;
+            cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
+            cpu->sp = (cpu->sp + 2) & 0xFFFF;
+        } else if (cpu->pc >= CPM_BIOS_BASE && cpu->pc < CPM_BIOS_BASE + 0x80) {
+            int cont = cpm_bios_dispatch(cpu);
+            if (!cont) return 1;
+            cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
+            cpu->sp = (cpu->sp + 2) & 0xFFFF;
+        }
         break;
 
     case Z80_OP_JR_E:

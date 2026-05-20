@@ -13,9 +13,9 @@ void cpm_install(z80_cpu_t *cpu) {
     cpu->mem[0x0001] = 0x00;
     cpu->mem[0x0002] = 0xF0;
 
-    cpu->mem[0x0005] = 0xC3; /* JP */
-    cpu->mem[0x0006] = 0x00;
-    cpu->mem[0x0007] = 0xF0;
+    cpu->mem[0x0005] = 0xC3; /* JP 0x0005 — self-referential so the interpreter trap on PC==0x0005 fires */
+    cpu->mem[0x0006] = 0x05;
+    cpu->mem[0x0007] = 0x00;
 
     memcpy(cpu->mem + 0xF000, "CPM2MONSTER", 12);
 
