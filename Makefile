@@ -83,8 +83,15 @@ tests/block.com: tools/mkblock
 tools/mkblock: tools/mkblock.c
 	$(CC) -o $@ $<
 
+tests/cb.com: tools/mkcb
+	@mkdir -p tests
+	./tools/mkcb
+
+tools/mkcb: tools/mkcb.c
+	$(CC) -o $@ $<
+
 # Quick sanity: does it even compile and say hello?
-smoke: $(TARGET) tests/hello.com tests/block.com
+smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com
 	@echo "=== Smoke test ==="
 	./$(TARGET) --version || true
 	@echo
@@ -94,4 +101,7 @@ smoke: $(TARGET) tests/hello.com tests/block.com
 	@echo "=== Running block.com (LDIR test) ==="
 	./$(TARGET) -s tests/block.com
 	@echo
-	@echo "Growth is working if both printed their messages cleanly."
+	@echo "=== Running cb.com (CB rotate + BIT test) ==="
+	./$(TARGET) -s tests/cb.com
+	@echo
+	@echo "Growth is working if we saw no UNIMPLEMENTED errors."

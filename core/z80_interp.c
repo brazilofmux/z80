@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 /* 8-bit register access helpers (the classic 0-7 encoding) */
 static inline uint8_t *reg8_ptr(z80_cpu_t *cpu, int r) {
@@ -568,6 +569,119 @@ int z80_step(z80_cpu_t *cpu) {
         cpu->f &= ~Z80_FLAG_H;
         cpu->f &= ~Z80_FLAG_N;
         break;
+
+    /* --------------------------------------------------------------------
+     * CB prefix group — rotates, shifts, BIT, RES, SET
+     * This is one of the most frequently used groups in real CP/M code.
+     * ------------------------------------------------------------------ */
+    case Z80_OP_CB: {
+        uint8_t sub = dec.imm8;          /* the 0x00-0xFF CB sub-opcode */
+        int r   = sub & 7;               /* register encoding (6 = (HL)) */
+        int grp = (sub >> 3) & 7;
+
+        bool is_bit = (sub >= 0x40 && sub < 0x80);
+        bool is_res = (sub >= 0x80 && sub < 0xC0);
+        bool is_set = (sub >= 0xC0);
+
+        uint8_t val;
+        bool mem = (r == 6);
+        uint16_t addr = 0;
+
+        if (mem) {
+            /* For now plain (HL). DD/FD CB d xx will be improved when we
+             * add proper indexed addressing support. */
+            addr = cpu->hl;
+            val = cpu->mem[addr & 0xFFFF];
+        } else {
+            uint8_t *p = reg8_ptr(cpu, r);
+            val = p ? *p : 0;
+        }
+
+        uint8_t result = val;
+        uint8_t new_f = cpu->f;
+        bool c = (new_f & Z80_FLAG_C) != 0;
+        bool new_c = false;
+
+        if (is_bit) {
+            int bit = (sub >> 3) & 7;
+            bool b = (val & (1u << bit)) != 0;
+            new_f &= ~(Z80_FLAG_Z | Z80_FLAG_H | Z80_FLAG_N | Z80_FLAG_PV);
+            if (!b) new_f |= Z80_FLAG_Z;
+            new_f |= Z80_FLAG_H;
+            if (!b) new_f |= Z80_FLAG_PV;
+            /* Undocumented 3/5 from the source byte */
+            new_f = (new_f & 0xC7) | (val & 0x28);
+            result = val;
+        } else if (is_res) {
+            int bit = (sub >> 3) & 7;
+            result &= ~(1u << bit);
+        } else if (is_set) {
+            int bit = (sub >> 3) & 7;
+            result |= (1u << bit);
+        } else {
+            /* Rotate / shift group */
+            switch (grp) {
+            case 0: /* RLC r / (HL) */
+                new_c = (val & 0x80) != 0;
+                result = (val << 1) | (new_c ? 1 : 0);
+                break;
+            case 1: /* RRC */
+                new_c = (val & 0x01) != 0;
+                result = (val >> 1) | (new_c ? 0x80 : 0);
+                break;
+            case 2: /* RL */
+                new_c = (val & 0x80) != 0;
+                result = (val << 1) | (c ? 1 : 0);
+                break;
+            case 3: /* RR */
+                new_c = (val & 0x01) != 0;
+                result = (val >> 1) | (c ? 0x80 : 0);
+                break;
+            case 4: /* SLA */
+                new_c = (val & 0x80) != 0;
+                result = (val << 1);
+                break;
+            case 5: /* SRA */
+                new_c = (val & 0x01) != 0;
+                result = (val >> 1) | (val & 0x80);   /* sign extend */
+                break;
+            case 6: /* SLL (undocumented, often acts like SLA but sets bit 0) */
+                new_c = (val & 0x80) != 0;
+                result = (val << 1) | 1;
+                break;
+            case 7: /* SRL */
+                new_c = (val & 0x01) != 0;
+                result = (val >> 1);
+                break;
+            }
+
+            if (new_c) new_f |= Z80_FLAG_C; else new_f &= ~Z80_FLAG_C;
+            new_f &= ~Z80_FLAG_H;
+            new_f &= ~Z80_FLAG_N;
+        }
+
+        /* Write back */
+        if (mem) {
+            cpu->mem[addr & 0xFFFF] = result;
+        } else {
+            uint8_t *p = reg8_ptr(cpu, r);
+            if (p) *p = result;
+        }
+
+        /* Common flag updates for non-BIT ops */
+        if (!is_bit) {
+            if (result == 0) new_f |= Z80_FLAG_Z; else new_f &= ~Z80_FLAG_Z;
+            if (result & 0x80) new_f |= Z80_FLAG_S; else new_f &= ~Z80_FLAG_S;
+
+            /* P/V = parity for most rotate/shift/RES/SET results */
+            int parity = 0;
+            for (int i = 0; i < 8; i++) parity ^= (result >> i) & 1;
+            if (parity == 0) new_f |= Z80_FLAG_PV; else new_f &= ~Z80_FLAG_PV;
+        }
+
+        cpu->f = new_f;
+        break;
+    }
 
     default:
         fprintf(stderr, "z80_step: UNIMPLEMENTED opcode %02X (prefix %02X) at %04X\n",

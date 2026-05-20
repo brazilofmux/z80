@@ -57,11 +57,27 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
 
     /* Now handle CB or ED (they can appear after DD/FD in theory) */
     if (op == 0xCB || op == 0xED) {
-        prefix = op;           /* for ED/CB we store which table */
+        prefix = op;
         out->prefix = prefix;
         pc++;
         out->bytes++;
-        op = mem[pc & 0xFFFF];
+
+        if (prefix == 0xCB) {
+            /* CB always has one more byte: the actual operation (0x00-0xFF) */
+            out->imm8 = mem[pc & 0xFFFF];   /* stash CB sub-opcode */
+            pc++;
+            out->bytes++;
+            /* For DD CB d xx / FD CB d xx the displacement was already consumed
+             * by the earlier DD/FD logic if present. For plain CB this is fine. */
+        } else {
+            op = mem[pc & 0xFFFF];   /* ED sub-op */
+        }
+    }
+
+    if (prefix == 0xCB) {
+        out->type = Z80_OP_CB;
+        out->opcode = out->imm8;   /* the CB sub-opcode (0x00-0xFF) */
+        return out->bytes;         /* CB is fully decoded; no further main-table work */
     }
 
     out->opcode = op;

@@ -189,6 +189,7 @@ typedef enum {
     Z80_OP_NEG,         /* ED 44 */
     Z80_OP_LDI,
     Z80_OP_LDD,
+    Z80_OP_CB,          /* CB prefix group: rotates, shifts, BIT/RES/SET */
 } z80_op_type;
 
 typedef struct {
