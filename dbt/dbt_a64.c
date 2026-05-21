@@ -133,6 +133,19 @@ static inline void emit_guest_storeb_w9_at_w10(emit_t *e) {
     emit_strb_reg_uxtw(e, A64_W9, A64_W20, A64_W10);
 }
 
+/* Wdst = (Wsrc + delta) & 0xFFFF — keep an address register in canonical
+ * 16-bit form before using it as an LDRB/STRB UXTW index. Necessary
+ * because Z80 SP+1 / SP-2 can wrap at 0xFFFF while the host buffer is
+ * exactly 64KB and UXTW would zero-extend an out-of-range value. */
+static void emit_add_mask16(emit_t *e, a64_reg_t dst, a64_reg_t src, uint32_t delta) {
+    emit_add_w32_imm(e, dst, src, delta);
+    (void)emit_and_w32_imm(e, dst, dst, 0xFFFF);
+}
+static void emit_sub_mask16(emit_t *e, a64_reg_t dst, a64_reg_t src, uint32_t delta) {
+    emit_sub_w32_imm(e, dst, src, delta);
+    (void)emit_and_w32_imm(e, dst, dst, 0xFFFF);
+}
+
 /* Emit the per-block tail: clear cpu->q (no step-1 op modifies F, so
  * the next interp step's prev_q must be 0), bump insn_count by delta,
  * and RET into the trampoline. pc-write is the caller's job. */
@@ -155,13 +168,17 @@ static void emit_block_epilogue(emit_t *e, uint16_t final_pc, uint32_t insn_coun
 }
 
 /* A "trap target" is any PC the interpreter knows how to dispatch as a
- * host service (BDOS at 0x0005, BIOS vector range at CPM_BIOS_BASE..+0x80).
- * Translated control flow into one of these would skip the dispatch and
- * leave the JIT executing uninitialised memory, so we refuse to translate
- * any branch whose target lands here and let the interp handle it. */
-static int is_trap_target(uint16_t pc) {
+ * host service. JP NN traps on BDOS (0x0005) and the BIOS vector range;
+ * CALL NN additionally traps on the warm-boot entry (0x0000). Refuse
+ * to translate control flow whose target lands here and let interp do
+ * the dispatch. */
+static int is_jp_trap_target(uint16_t pc) {
     return pc == CPM_BDOS_ENTRY
         || (pc >= CPM_BIOS_BASE && pc < CPM_BIOS_BASE + 0x80);
+}
+static int is_call_trap_target(uint16_t pc) {
+    return pc == CPM_WBOOT_ENTRY
+        || is_jp_trap_target(pc);
 }
 
 /* Return 1 if this op type, in this prefix/register configuration, is
@@ -208,11 +225,15 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
         return rr_offset(dec->reg1) >= 0;
 
     case Z80_OP_JP_NN:
-        return !is_trap_target(dec->imm16);
+        return !is_jp_trap_target(dec->imm16);
     case Z80_OP_JR_E: {
         uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
-        return !is_trap_target(target);
+        return !is_jp_trap_target(target);
     }
+    case Z80_OP_CALL_NN:
+        return !is_call_trap_target(dec->imm16);
+    case Z80_OP_RET:
+        return 1;
     default:
         return 0;
     }
@@ -380,6 +401,64 @@ static int emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
         emit_movz_w32(e, A64_W9, target, 0);
         emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+        return 1;
+    }
+
+    case Z80_OP_CALL_NN: {
+        /* CALL nn:
+         *   sp = (sp - 2) & 0xFFFF
+         *   mem[sp]     = pc_after & 0xFF
+         *   mem[sp + 1] = (pc_after >> 8) & 0xFF        (sp+1 also masked)
+         *   pc          = target                          (block ends)
+         *
+         * Trap targets (BDOS/WBOOT/BIOS) were filtered by can_translate
+         * — this case only runs for "regular" callees. */
+        emit_ldrh_imm(e, A64_W11, A64_W19, OFF_SP);
+        emit_sub_mask16(e, A64_W11, A64_W11, 2);
+        emit_strh_imm(e, A64_W11, A64_W19, OFF_SP);
+
+        /* mem[W11] = pc_after_lo */
+        emit_movz_w32(e, A64_W9, pc_after & 0xFF, 0);
+        emit_strb_reg_uxtw(e, A64_W9, A64_W20, A64_W11);
+
+        /* mem[(W11+1)&0xFFFF] = pc_after_hi */
+        emit_add_mask16(e, A64_W12, A64_W11, 1);
+        emit_movz_w32(e, A64_W9, (pc_after >> 8) & 0xFF, 0);
+        emit_strb_reg_uxtw(e, A64_W9, A64_W20, A64_W12);
+
+        /* pc = target */
+        emit_movz_w32(e, A64_W9, dec->imm16, 0);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+        return 1;
+    }
+
+    case Z80_OP_RET: {
+        /* RET:
+         *   pc.lo = mem[sp]
+         *   pc.hi = mem[(sp + 1) & 0xFFFF]
+         *   sp    = (sp + 2) & 0xFFFF
+         *
+         * Popped pc == 0 is the classic CP/M warm-boot termination;
+         * dbt_run's top-of-loop pc==0 && insn_count>4 check catches it,
+         * so we don't need a runtime branch here. */
+        (void)pc_after;
+        emit_ldrh_imm(e, A64_W11, A64_W19, OFF_SP);
+
+        /* W9 = mem[sp] (pc low byte) */
+        emit_ldrb_reg_uxtw(e, A64_W9, A64_W20, A64_W11);
+
+        /* W10 = mem[(sp+1)&0xFFFF] (pc high byte) */
+        emit_add_mask16(e, A64_W12, A64_W11, 1);
+        emit_ldrb_reg_uxtw(e, A64_W10, A64_W20, A64_W12);
+
+        /* W9 = pc = lo | (hi << 8) */
+        emit_lsl_w32_imm(e, A64_W10, A64_W10, 8);
+        emit_orr_w32(e, A64_W9, A64_W9, A64_W10);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+
+        /* sp += 2, masked */
+        emit_add_mask16(e, A64_W11, A64_W11, 2);
+        emit_strh_imm(e, A64_W11, A64_W19, OFF_SP);
         return 1;
     }
 
