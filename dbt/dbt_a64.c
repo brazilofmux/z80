@@ -89,6 +89,14 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
 #define OFF_BC         offsetof(z80_cpu_t, bc)
 #define OFF_DE         offsetof(z80_cpu_t, de)
 #define OFF_HL         offsetof(z80_cpu_t, hl)
+#define OFF_IX         offsetof(z80_cpu_t, ix)
+#define OFF_IY         offsetof(z80_cpu_t, iy)
+/* The struct stores ix/iy as plain uint16_t, no union halves. We index
+ * the high/low byte via offsetof + 0/1 since the host is little-endian. */
+#define OFF_IXL        (offsetof(z80_cpu_t, ix) + 0)
+#define OFF_IXH        (offsetof(z80_cpu_t, ix) + 1)
+#define OFF_IYL        (offsetof(z80_cpu_t, iy) + 0)
+#define OFF_IYH        (offsetof(z80_cpu_t, iy) + 1)
 #define OFF_SP         offsetof(z80_cpu_t, sp)
 #define OFF_PC         offsetof(z80_cpu_t, pc)
 #define OFF_Q          offsetof(z80_cpu_t, q)
@@ -97,9 +105,10 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
 
 /* Map a Z80 reg code 0..7 (B,C,D,E,H,L,(HL),A) to its byte offset
  * within z80_cpu_t. Code 6 is (HL), handled by the memory-op cases
- * via X20 + HL. Codes 8/9 (IXH/IXL/IYH/IYL with DD/FD prefix) are not
- * handled here — first cut skips them. Returns -1 on unsupported. */
-static int reg8_offset(int r) {
+ * via X20 + HL. Codes 8/9 — IXH/IXL or IYH/IYL — are the DD/FD
+ * half-register remap; the prefix selects IX vs IY. Returns -1 on
+ * unsupported (here that's just (HL)). */
+static int reg8_offset_p(int r, uint8_t prefix) {
     switch (r) {
     case 0: return OFF_B;
     case 1: return OFF_C;
@@ -108,8 +117,17 @@ static int reg8_offset(int r) {
     case 4: return OFF_H;
     case 5: return OFF_L;
     case 7: return OFF_A;
+    case 8: return (prefix == 0xFD) ? OFF_IYH : OFF_IXH;
+    case 9: return (prefix == 0xFD) ? OFF_IYL : OFF_IXL;
     default: return -1;
     }
+}
+static int reg8_offset(int r) { return reg8_offset_p(r, 0); }
+
+/* Offset of the IX or IY register (full 16-bit) for the given DD/FD
+ * prefix. Caller must already know prefix is DD or FD. */
+static int idx_reg_offset(uint8_t prefix) {
+    return (prefix == 0xFD) ? OFF_IY : OFF_IX;
 }
 
 /* Map a 16-bit pair code 0..3 to the union field's offset. Code 3 is
@@ -122,6 +140,14 @@ static int rr_offset(int rr) {
     case 3: return OFF_SP;
     default: return -1;
     }
+}
+
+/* Prefix-aware rr_offset: under DD/FD, the HL slot (code 2) actually
+ * names IX or IY. SP/BC/DE unaffected. */
+static int rr_offset_p(int rr, uint8_t prefix) {
+    if (rr == 2 && (prefix == 0xDD || prefix == 0xFD))
+        return idx_reg_offset(prefix);
+    return rr_offset(rr);
 }
 
 /* ---- Tiny emit helpers used by the per-op cases. W9 is the canonical
@@ -217,6 +243,27 @@ static void emit_set_memptr_quirk_rr(emit_t *e, uint32_t off_rr) {
     emit_lsl_w32_imm(e, A64_W9, A64_W9, 8);
     emit_orr_w32(e, A64_W9, A64_W9, A64_W12);
     emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
+}
+
+/* Wdst = ((IX|IY) + (int8)disp) & 0xFFFF. Loads the 16-bit IX/IY,
+ * adds the sign-extended displacement, masks to 16 bits. The mask is
+ * required because the host uses UXTW on the result as a memory index,
+ * and (IX+d) is allowed to wrap across the 64KB boundary. Uses only
+ * `dst`; no other scratch. */
+static void emit_idx_eff_addr(emit_t *e, a64_reg_t dst, uint8_t prefix, int8_t disp) {
+    emit_ldrh_imm(e, dst, A64_W19, (uint32_t)idx_reg_offset(prefix));
+    if (disp == 0) {
+        (void)emit_and_w32_imm(e, dst, dst, 0xFFFF);
+        return;
+    }
+    /* Sign-extend the 8-bit disp into a 32-bit value. MOVZ + sign-fix:
+     * for negative disp use the equivalent SUB; for positive use ADD. */
+    if (disp > 0) {
+        emit_add_w32_imm(e, dst, dst, (uint32_t)disp);
+    } else {
+        emit_sub_w32_imm(e, dst, dst, (uint32_t)(-disp));
+    }
+    (void)emit_and_w32_imm(e, dst, dst, 0xFFFF);
 }
 
 /* cpu->memptr = (rr + 1) & 0xFFFF. Used by LD A,(BC|DE) — straight
@@ -350,27 +397,30 @@ static int is_call_trap_target(uint16_t pc) {
 /* Return 1 if this op type, in this prefix/register configuration, is
  * something the first-cut translator can emit. */
 static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
-    /* DD/FD prefixes redirect HL→IX/IY and introduce half-register
-     * encodings; first cut skips them entirely. CB/ED prefixes are
-     * full alternate ISAs and also skipped. */
-    if (dec->prefix != 0) return 0;
+    /* CB/ED prefixes are full alternate ISAs — first cut skips them
+     * entirely. DD/FD (IX/IY) prefix is accepted on a per-op basis below;
+     * each translatable op explicitly opts in. */
+    if (dec->prefix == 0xCB || dec->prefix == 0xED) return 0;
+    int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
 
     switch (dec->type) {
     case Z80_OP_NOP:
-        return 1;
+        return !idx;   /* DD/FD NOP is reserved; let interp handle. */
 
     case Z80_OP_LD_R_N:
-        return reg8_offset(dec->reg1) >= 0;
+        return reg8_offset_p(dec->reg1, dec->prefix) >= 0;
 
     case Z80_OP_LD_R_R:
-        /* (HL) on either side is the unprefixed indirect form; we handle
-         * it as a memory op below. (HL)/(HL) is HALT (filtered by the
-         * decoder), so we never see both = 6. */
-        if (dec->reg1 == 6) return reg8_offset(dec->reg2) >= 0;
-        if (dec->reg2 == 6) return reg8_offset(dec->reg1) >= 0;
-        return reg8_offset(dec->reg1) >= 0 && reg8_offset(dec->reg2) >= 0;
+        /* (HL) on either side under no prefix is the indirect form;
+         * under DD/FD the decoder routes those to LD_*_HL_ind so we
+         * only see pure register forms here. */
+        if (dec->reg1 == 6) return !idx && reg8_offset(dec->reg2) >= 0;
+        if (dec->reg2 == 6) return !idx && reg8_offset(dec->reg1) >= 0;
+        return reg8_offset_p(dec->reg1, dec->prefix) >= 0
+            && reg8_offset_p(dec->reg2, dec->prefix) >= 0;
 
     case Z80_OP_LD_RR_NN:
+        /* DD/FD LD HL,nn is really LD IX,nn / LD IY,nn — accept it. */
         return rr_offset(dec->reg1) >= 0;
 
     case Z80_OP_LD_HL_N:
@@ -380,19 +430,21 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_LD_DE_A:
     case Z80_OP_LD_A_NN:
     case Z80_OP_LD_NN_A:
+        return !idx;
     case Z80_OP_LD_HL_indNN:
     case Z80_OP_LD_NN_HL:
-    case Z80_OP_EX_DE_HL:
     case Z80_OP_LD_SP_HL:
-        return 1;
+        return 1;    /* DD/FD variants land on IX/IY */
+    case Z80_OP_EX_DE_HL:
+        return !idx; /* DD/FD EX DE,HL is a no-op on real silicon; rare */
 
     case Z80_OP_INC_RR:
     case Z80_OP_DEC_RR:
         return rr_offset(dec->reg1) >= 0;
 
-    /* 8-bit ALU A,<src>. reg=6 means (HL); the helper path takes a byte
-     * either way. Half-index regs (codes 8/9) need the DD/FD prefix,
-     * which we've already rejected up top. */
+    /* 8-bit ALU A,<src>. reg=6 means (HL) / (IX+d) / (IY+d); the helper
+     * path takes a byte either way. Codes 8/9 require DD/FD prefix —
+     * reg8_offset_p resolves them. */
     case Z80_OP_ADD_A_R:
     case Z80_OP_ADC_A_R:
     case Z80_OP_SUB_A_R:
@@ -401,7 +453,8 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_OR_A_R:
     case Z80_OP_XOR_A_R:
     case Z80_OP_CP_A_R:
-        return dec->reg1 == 6 || reg8_offset(dec->reg1) >= 0;
+        return dec->reg1 == 6 ? !idx
+                              : reg8_offset_p(dec->reg1, dec->prefix) >= 0;
 
     case Z80_OP_ADD_A_N:
     case Z80_OP_ADC_A_N:
@@ -411,13 +464,41 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_OR_A_N:
     case Z80_OP_XOR_A_N:
     case Z80_OP_CP_A_N:
-        return 1;
+        return !idx;
 
-    /* INC/DEC r — reg=6 is (HL), needs a memory load+store sequence
-     * that we don't emit yet. Same with half-index regs. */
+    /* INC/DEC r — reg=6 is (HL) (or (IX+d)/(IY+d), but that uses the
+     * INC_HL_ind / DEC_HL_ind opcodes). Half-index regs land here under
+     * DD/FD via reg8_offset_p(8|9). */
     case Z80_OP_INC_R:
     case Z80_OP_DEC_R:
-        return reg8_offset(dec->reg1) >= 0;
+        return reg8_offset_p(dec->reg1, dec->prefix) >= 0;
+
+    /* DD/FD-prefixed indexed memory ops. (Unprefixed LD r,(HL) / (HL),r
+     * still come through LD_R_R with reg=6.) */
+    case Z80_OP_LD_A_HL_ind:
+    case Z80_OP_LD_HL_A_ind:
+    case Z80_OP_LD_HL_N_ind:
+        return idx;
+    case Z80_OP_LD_R_HL_ind:
+        return idx && reg8_offset(dec->reg2) >= 0;
+    case Z80_OP_LD_HL_R_ind:
+        return idx && reg8_offset(dec->reg2) >= 0;
+    case Z80_OP_INC_HL_ind:
+    case Z80_OP_DEC_HL_ind:
+    case Z80_OP_ADD_A_HL_ind:
+    case Z80_OP_ADC_A_HL_ind:
+    case Z80_OP_SUB_A_HL_ind:
+    case Z80_OP_SBC_A_HL_ind:
+    case Z80_OP_AND_A_HL_ind:
+    case Z80_OP_OR_A_HL_ind:
+    case Z80_OP_XOR_A_HL_ind:
+    case Z80_OP_CP_A_HL_ind:
+        return idx;
+    case Z80_OP_JP_HL:
+        /* Plain JP (HL) only. JP (IX)/JP (IY) under DD/FD is rare and
+         * the interp has a latent bug (always reads cpu->hl); leave it
+         * to interp until the interp side is straightened out. */
+        return !idx;
 
     case Z80_OP_JP_NN:
         return !is_jp_trap_target(dec->imm16);
@@ -457,12 +538,12 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
  *   reg=0..5,7    : LDRB cpu->r into W1.
  *   imm path is caller's job (just MOVZ W1, #imm).
  */
-static void emit_alu_src_from_reg(emit_t *e, int reg) {
+static void emit_alu_src_from_reg(emit_t *e, int reg, uint8_t prefix) {
     if (reg == 6) {
         emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
         emit_ldrb_reg_uxtw(e, A64_W1, A64_W20, A64_W10);
     } else {
-        int off = reg8_offset(reg);
+        int off = reg8_offset_p(reg, prefix);
         emit_ldrb_imm(e, A64_W1, A64_W19, (uint32_t)off);
     }
 }
@@ -473,7 +554,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_FALL_THROUGH;
 
     case Z80_OP_LD_R_N: {
-        int off = reg8_offset(dec->reg1);
+        int off = reg8_offset_p(dec->reg1, dec->prefix);
         emit_movz_w32(e, A64_W9, dec->imm8, 0);
         emit_strb_imm(e, A64_W9, A64_W19, (uint32_t)off);
         return OP_FALL_THROUGH;
@@ -481,7 +562,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
 
     case Z80_OP_LD_R_R: {
         if (dec->reg1 == 6) {
-            /* LD (HL), r : mem[HL] = reg2 */
+            /* LD (HL), r : mem[HL] = reg2  (unprefixed only — can_translate gate) */
             int off_src = reg8_offset(dec->reg2);
             emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
             emit_ldrb_imm(e, A64_W9,  A64_W19, (uint32_t)off_src);
@@ -489,15 +570,15 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
             return OP_FALL_THROUGH;
         }
         if (dec->reg2 == 6) {
-            /* LD r, (HL) : reg1 = mem[HL] */
+            /* LD r, (HL) : reg1 = mem[HL]  (unprefixed only) */
             int off_dst = reg8_offset(dec->reg1);
             emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
             emit_guest_loadb_w9_at_w10(e);
             emit_strb_imm(e, A64_W9, A64_W19, (uint32_t)off_dst);
             return OP_FALL_THROUGH;
         }
-        int off_dst = reg8_offset(dec->reg1);
-        int off_src = reg8_offset(dec->reg2);
+        int off_dst = reg8_offset_p(dec->reg1, dec->prefix);
+        int off_src = reg8_offset_p(dec->reg2, dec->prefix);
         if (off_dst == off_src) return OP_FALL_THROUGH;   /* LD A,A and friends — no-op */
         emit_ldrb_imm(e, A64_W9, A64_W19, (uint32_t)off_src);
         emit_strb_imm(e, A64_W9, A64_W19, (uint32_t)off_dst);
@@ -505,7 +586,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
     }
 
     case Z80_OP_LD_RR_NN: {
-        int off = rr_offset(dec->reg1);
+        int off = rr_offset_p(dec->reg1, dec->prefix);
         emit_load_imm16_into(e, A64_W9, dec->imm16);
         emit_strh_imm(e, A64_W9, A64_W19, (uint32_t)off);
         return OP_FALL_THROUGH;
@@ -517,6 +598,92 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_movz_w32(e, A64_W9, dec->imm8, 0);
         emit_guest_storeb_w9_at_w10_smc(e);
         return OP_FALL_THROUGH;
+    }
+
+    /* ---- DD/FD indexed memory ops. effective addr = (IX|IY) + disp.
+     * Mirrors the interpreter: memptr is NOT updated for these (the
+     * indexed form's memptr semantics only matter for BIT n,(IX+d),
+     * which is DD-CB-prefix territory we don't translate yet). */
+    case Z80_OP_LD_A_HL_ind: {
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_guest_loadb_w9_at_w10(e);
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_A);
+        return OP_FALL_THROUGH;
+    }
+    case Z80_OP_LD_HL_A_ind: {
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_ldrb_imm(e, A64_W9, A64_W19, OFF_A);
+        emit_guest_storeb_w9_at_w10_smc(e);
+        return OP_FALL_THROUGH;
+    }
+    case Z80_OP_LD_R_HL_ind: {
+        /* reg2 is the destination GPR — main H/L, not IXH/IXL. */
+        int off_dst = reg8_offset(dec->reg2);
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_guest_loadb_w9_at_w10(e);
+        emit_strb_imm(e, A64_W9, A64_W19, (uint32_t)off_dst);
+        return OP_FALL_THROUGH;
+    }
+    case Z80_OP_LD_HL_R_ind: {
+        int off_src = reg8_offset(dec->reg2);
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_ldrb_imm(e, A64_W9, A64_W19, (uint32_t)off_src);
+        emit_guest_storeb_w9_at_w10_smc(e);
+        return OP_FALL_THROUGH;
+    }
+    case Z80_OP_LD_HL_N_ind: {
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_movz_w32(e, A64_W9, dec->imm8, 0);
+        emit_guest_storeb_w9_at_w10_smc(e);
+        return OP_FALL_THROUGH;
+    }
+    case Z80_OP_INC_HL_ind: {
+        /* mem[eff] = INC8(mem[eff]). The store goes through the SMC
+         * helper since the byte we just modified might be code. */
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_guest_loadb_w9_at_w10(e);          /* W9 = old byte */
+        emit_mov_w32_w32(e, A64_W1, A64_W9);
+        emit_call_helper(e, (void *)(uintptr_t)z80_jit_inc8);
+        /* helper returns new value in W0; addr W10 was clobbered. Reload. */
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_mov_w32_w32(e, A64_W9, A64_W0);
+        emit_guest_storeb_w9_at_w10_smc(e);
+        return OP_MODIFIES_F;
+    }
+    case Z80_OP_DEC_HL_ind: {
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_guest_loadb_w9_at_w10(e);
+        emit_mov_w32_w32(e, A64_W1, A64_W9);
+        emit_call_helper(e, (void *)(uintptr_t)z80_jit_dec8);
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_mov_w32_w32(e, A64_W9, A64_W0);
+        emit_guest_storeb_w9_at_w10_smc(e);
+        return OP_MODIFIES_F;
+    }
+    case Z80_OP_ADD_A_HL_ind:
+    case Z80_OP_ADC_A_HL_ind:
+    case Z80_OP_SUB_A_HL_ind:
+    case Z80_OP_SBC_A_HL_ind:
+    case Z80_OP_AND_A_HL_ind:
+    case Z80_OP_OR_A_HL_ind:
+    case Z80_OP_XOR_A_HL_ind:
+    case Z80_OP_CP_A_HL_ind:  {
+        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        emit_ldrb_reg_uxtw(e, A64_W1, A64_W20, A64_W10);
+        void *helper;
+        switch (dec->type) {
+        case Z80_OP_ADD_A_HL_ind: helper = (void *)z80_jit_add; break;
+        case Z80_OP_ADC_A_HL_ind: helper = (void *)z80_jit_adc; break;
+        case Z80_OP_SUB_A_HL_ind: helper = (void *)z80_jit_sub; break;
+        case Z80_OP_SBC_A_HL_ind: helper = (void *)z80_jit_sbc; break;
+        case Z80_OP_AND_A_HL_ind: helper = (void *)z80_jit_and; break;
+        case Z80_OP_OR_A_HL_ind:  helper = (void *)z80_jit_or;  break;
+        case Z80_OP_XOR_A_HL_ind: helper = (void *)z80_jit_xor; break;
+        case Z80_OP_CP_A_HL_ind:  helper = (void *)z80_jit_cp;  break;
+        default: helper = NULL;
+        }
+        emit_call_helper(e, helper);
+        return OP_MODIFIES_F;
     }
 
     case Z80_OP_LD_A_BC: {
@@ -566,40 +733,51 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_LD_HL_indNN: {
         /* HL.lo = mem[nn] ; HL.hi = mem[(nn+1) & 0xFFFF] — byte-by-byte
          * because nn+1 must wrap at 0x10000 and the host buffer is only
-         * 64K, so a 16-bit halfword load at nn=0xFFFF would walk off. */
+         * 64K, so a 16-bit halfword load at nn=0xFFFF would walk off.
+         * Under DD/FD prefix, target is IX or IY instead of HL. */
         uint16_t nn  = dec->imm16;
         uint16_t nn1 = (uint16_t)(nn + 1);
+        int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
+        uint32_t off_lo = idx ? (uint32_t)idx_reg_offset(dec->prefix)
+                              : OFF_L;
+        uint32_t off_hi = idx ? (uint32_t)idx_reg_offset(dec->prefix) + 1
+                              : OFF_H;
         emit_load_imm16_into(e, A64_W10, nn);
         emit_guest_loadb_w9_at_w10(e);
-        emit_strb_imm(e, A64_W9, A64_W19, OFF_L);
+        emit_strb_imm(e, A64_W9, A64_W19, off_lo);
         emit_load_imm16_into(e, A64_W10, nn1);
         emit_guest_loadb_w9_at_w10(e);
-        emit_strb_imm(e, A64_W9, A64_W19, OFF_H);
+        emit_strb_imm(e, A64_W9, A64_W19, off_hi);
         emit_set_memptr_imm(e, nn1);
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_NN_HL: {
         uint16_t nn  = dec->imm16;
         uint16_t nn1 = (uint16_t)(nn + 1);
+        int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
+        uint32_t off_lo = idx ? (uint32_t)idx_reg_offset(dec->prefix)
+                              : OFF_L;
+        uint32_t off_hi = idx ? (uint32_t)idx_reg_offset(dec->prefix) + 1
+                              : OFF_H;
         emit_load_imm16_into(e, A64_W10, nn);
-        emit_ldrb_imm(e, A64_W9, A64_W19, OFF_L);
+        emit_ldrb_imm(e, A64_W9, A64_W19, off_lo);
         emit_guest_storeb_w9_at_w10_smc(e);
         emit_load_imm16_into(e, A64_W10, nn1);
-        emit_ldrb_imm(e, A64_W9, A64_W19, OFF_H);
+        emit_ldrb_imm(e, A64_W9, A64_W19, off_hi);
         emit_guest_storeb_w9_at_w10_smc(e);
         emit_set_memptr_imm(e, nn1);
         return OP_FALL_THROUGH;
     }
 
     case Z80_OP_INC_RR: {
-        int off = rr_offset(dec->reg1);
+        int off = rr_offset_p(dec->reg1, dec->prefix);
         emit_ldrh_imm(e, A64_W9, A64_W19, (uint32_t)off);
         emit_add_w32_imm(e, A64_W9, A64_W9, 1);
         emit_strh_imm(e, A64_W9, A64_W19, (uint32_t)off);
         return OP_FALL_THROUGH;
     }
     case Z80_OP_DEC_RR: {
-        int off = rr_offset(dec->reg1);
+        int off = rr_offset_p(dec->reg1, dec->prefix);
         emit_ldrh_imm(e, A64_W9, A64_W19, (uint32_t)off);
         emit_sub_w32_imm(e, A64_W9, A64_W9, 1);
         emit_strh_imm(e, A64_W9, A64_W19, (uint32_t)off);
@@ -615,14 +793,16 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
     }
 
     case Z80_OP_LD_SP_HL: {
-        emit_ldrh_imm(e, A64_W9, A64_W19, OFF_HL);
+        int src_off = (dec->prefix == 0xDD || dec->prefix == 0xFD)
+                          ? idx_reg_offset(dec->prefix) : OFF_HL;
+        emit_ldrh_imm(e, A64_W9, A64_W19, (uint32_t)src_off);
         emit_strh_imm(e, A64_W9, A64_W19, OFF_SP);
         return OP_FALL_THROUGH;
     }
 
     /* ---- 8-bit ALU. Helpers in dbt_flags.c do the actual flag math. */
     case Z80_OP_ADD_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1);
+        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_add);
         return OP_MODIFIES_F;
     }
@@ -632,7 +812,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_MODIFIES_F;
     }
     case Z80_OP_ADC_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1);
+        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_adc);
         return OP_MODIFIES_F;
     }
@@ -642,7 +822,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_MODIFIES_F;
     }
     case Z80_OP_SUB_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1);
+        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_sub);
         return OP_MODIFIES_F;
     }
@@ -652,7 +832,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_MODIFIES_F;
     }
     case Z80_OP_SBC_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1);
+        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_sbc);
         return OP_MODIFIES_F;
     }
@@ -662,7 +842,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_MODIFIES_F;
     }
     case Z80_OP_AND_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1);
+        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_and);
         return OP_MODIFIES_F;
     }
@@ -672,7 +852,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_MODIFIES_F;
     }
     case Z80_OP_OR_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1);
+        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_or);
         return OP_MODIFIES_F;
     }
@@ -682,7 +862,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_MODIFIES_F;
     }
     case Z80_OP_XOR_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1);
+        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_xor);
         return OP_MODIFIES_F;
     }
@@ -692,7 +872,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_MODIFIES_F;
     }
     case Z80_OP_CP_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1);
+        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_cp);
         return OP_MODIFIES_F;
     }
@@ -703,15 +883,14 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
     }
 
     case Z80_OP_INC_R: {
-        /* INC (HL) and the half-index regs aren't translated yet. */
-        int off = reg8_offset(dec->reg1);
+        int off = reg8_offset_p(dec->reg1, dec->prefix);
         emit_ldrb_imm(e, A64_W1, A64_W19, (uint32_t)off);   /* W1 = old value */
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_inc8);
         emit_strb_imm(e, A64_W0, A64_W19, (uint32_t)off);   /* W0 = new value */
         return OP_MODIFIES_F;
     }
     case Z80_OP_DEC_R: {
-        int off = reg8_offset(dec->reg1);
+        int off = reg8_offset_p(dec->reg1, dec->prefix);
         emit_ldrb_imm(e, A64_W1, A64_W19, (uint32_t)off);
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_dec8);
         emit_strb_imm(e, A64_W0, A64_W19, (uint32_t)off);
@@ -725,6 +904,13 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_movz_w32(e, A64_W9, dec->imm16, 0);
         emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
         emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
+        return OP_ENDS_BLOCK;
+    }
+
+    case Z80_OP_JP_HL: {
+        /* pc = HL. memptr unchanged (matches interp). */
+        emit_ldrh_imm(e, A64_W9, A64_W19, OFF_HL);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
         return OP_ENDS_BLOCK;
     }
 
