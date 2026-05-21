@@ -43,3 +43,34 @@ void dbt_mark_block_bytes(z80_dbt_t *dbt, uint16_t start, uint32_t end) {
         dbt->code_bitmap[a & 0xFFFF] = 1;
     }
 }
+
+/* SMC_INVAL_WINDOW: upper bound on bytes a single translated block can
+ * cover; a store at A might invalidate any block-start in
+ * [A - SMC_INVAL_WINDOW + 1, A]. Kept in sync with the value in
+ * dbt_flags.c (z80_jit_post_store uses the same window). */
+#define SMC_INVAL_WINDOW 320
+
+static void dbt_invalidate_for_store(z80_dbt_t *dbt, uint16_t addr) {
+    for (int k = 0; k < SMC_INVAL_WINDOW; k++) {
+        uint16_t p = (uint16_t)(addr - k);
+        dbt->cache[p & BLOCK_CACHE_MASK].guest_pc    = BLOCK_EMPTY_PC;
+        dbt->cache[p & BLOCK_CACHE_MASK].native_code = NULL;
+        dbt->code_bitmap[p] = 0;
+    }
+    for (int k = 1; k < SMC_INVAL_WINDOW; k++) {
+        uint16_t p = (uint16_t)(addr + k);
+        dbt->code_bitmap[p] = 0;
+    }
+    dbt->smc_invalidations++;
+}
+
+/* Public wrapper for every interp / cpm memory write. JIT-translated
+ * stores have an inline equivalent in the emitted code. */
+void z80_mem_w(z80_cpu_t *cpu, uint16_t addr, uint8_t val) {
+    cpu->mem[addr & 0xFFFF] = val;
+    if (!cpu->dbt) return;
+    z80_dbt_t *dbt = (z80_dbt_t *)cpu->dbt;
+    if (dbt->code_bitmap[addr & 0xFFFF]) {
+        dbt_invalidate_for_store(dbt, addr);
+    }
+}

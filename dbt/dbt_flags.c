@@ -149,29 +149,15 @@ uint8_t z80_jit_dec8(z80_cpu_t *cpu, uint8_t v) {
     return res;
 }
 
-/* Upper bound on bytes a single translated block can cover. Used as the
- * SMC-invalidation window: a store at A may corrupt any block whose
- * start_pc lies in [A - SMC_INVAL_WINDOW + 1, A]. MAX_BLOCK_INSNS=64
- * with max 4 bytes/insn would be 256; we use 320 for a little slack. */
-#define SMC_INVAL_WINDOW 320
-
+/* Called from JIT-emitted store sequences after a guest byte store. The
+ * inline LDRB+CBZ around the call already short-circuits the no-SMC
+ * case, so by the time we get here we know we have a real hit and the
+ * invalidation must run. Delegate to z80_mem_w's shared invalidation
+ * implementation in block_cache.c — but we've already done the store,
+ * so just re-call it as if we were a one-byte interp write. */
 void z80_jit_post_store(z80_cpu_t *cpu, uint16_t addr) {
-    z80_dbt_t *dbt = (z80_dbt_t *)cpu->dbt;
-    if (!dbt) return;
-    if (!dbt->code_bitmap[addr & 0xFFFF]) return;       /* fast path: no code here */
-
-    /* SMC hit. Invalidate every cache entry whose guest_pc could have
-     * been a block-start covering byte `addr`, and clear the bitmap for
-     * the same byte range so the fast path engages again. */
-    for (int k = 0; k < SMC_INVAL_WINDOW; k++) {
-        uint16_t p = (uint16_t)(addr - k);
-        dbt->cache[p & BLOCK_CACHE_MASK].guest_pc    = BLOCK_EMPTY_PC;
-        dbt->cache[p & BLOCK_CACHE_MASK].native_code = NULL;
-        dbt->code_bitmap[p] = 0;
-    }
-    for (int k = 1; k < SMC_INVAL_WINDOW; k++) {
-        uint16_t p = (uint16_t)(addr + k);
-        dbt->code_bitmap[p] = 0;
-    }
-    dbt->smc_invalidations++;
+    /* z80_mem_w would re-do the store, but cpu->mem[addr] is already
+     * the new value; doing it once more is a no-op write. The whole
+     * point of this entry point is to share the invalidation. */
+    z80_mem_w(cpu, addr, cpu->mem[addr & 0xFFFF]);
 }

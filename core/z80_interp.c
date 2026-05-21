@@ -73,7 +73,7 @@ static inline uint8_t read_reg8(z80_cpu_t *cpu, int r, const z80_decoded *dec) {
 static inline void write_reg8(z80_cpu_t *cpu, int r, uint8_t val, const z80_decoded *dec) {
     if (r == 6) {
         uint16_t addr = effective_addr(cpu, dec, cpu->hl);
-        cpu->mem[addr & 0xFFFF] = val;
+        z80_mem_w(cpu, addr, val);
         return;
     }
     uint8_t *p = reg8_ptr_p(cpu, r, dec->prefix);
@@ -221,7 +221,7 @@ int z80_step(z80_cpu_t *cpu) {
         {
             uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] + 1;
-            cpu->mem[a] = v;
+            z80_mem_w(cpu, a, v);
             uint8_t f = (cpu->f & Z80_FLAG_C) | xy_from(v);
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
@@ -236,7 +236,7 @@ int z80_step(z80_cpu_t *cpu) {
         {
             uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] - 1;
-            cpu->mem[a] = v;
+            z80_mem_w(cpu, a, v);
             uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N | xy_from(v);
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
@@ -248,7 +248,7 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_LD_NN_A:
-        cpu->mem[dec.imm16 & 0xFFFF] = cpu->a;
+        z80_mem_w(cpu, dec.imm16, cpu->a);
         /* MEMPTR.low = (nn+1) & 0xFF, MEMPTR.high = A */
         cpu->memptr = ((dec.imm16 + 1) & 0xFF) | ((uint16_t)cpu->a << 8);
         break;
@@ -293,12 +293,12 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_LD_DE_A:
-        cpu->mem[cpu->de & 0xFFFF] = cpu->a;
+        z80_mem_w(cpu, cpu->de, cpu->a);
         cpu->memptr = ((cpu->de + 1) & 0xFF) | ((uint16_t)cpu->a << 8);
         break;
 
     case Z80_OP_LD_BC_A:
-        cpu->mem[cpu->bc & 0xFFFF] = cpu->a;
+        z80_mem_w(cpu, cpu->bc, cpu->a);
         cpu->memptr = ((cpu->bc + 1) & 0xFF) | ((uint16_t)cpu->a << 8);
         break;
 
@@ -306,7 +306,7 @@ int z80_step(z80_cpu_t *cpu) {
         if (dec.reg1 == 6) { /* (HL) or (IX+d)/(IY+d) */
             uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] + 1;
-            cpu->mem[a] = v;
+            z80_mem_w(cpu, a, v);
             uint8_t f = (cpu->f & Z80_FLAG_C) | xy_from(v);
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
@@ -334,7 +334,7 @@ int z80_step(z80_cpu_t *cpu) {
         if (dec.reg1 == 6) {
             uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] - 1;
-            cpu->mem[a] = v;
+            z80_mem_w(cpu, a, v);
             uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N | xy_from(v);
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
@@ -528,8 +528,8 @@ int z80_step(z80_cpu_t *cpu) {
             uint16_t *dst = (dec.prefix == 0xDD) ? &cpu->ix
                           : (dec.prefix == 0xFD) ? &cpu->iy
                           : &cpu->hl;
-            cpu->mem[cpu->sp]     = (uint8_t)(*dst & 0xFF);
-            cpu->mem[(cpu->sp + 1) & 0xFFFF] = (uint8_t)(*dst >> 8);
+            z80_mem_w(cpu, cpu->sp, (uint8_t)(*dst & 0xFF));
+            z80_mem_w(cpu, (uint16_t)(cpu->sp + 1), (uint8_t)(*dst >> 8));
             *dst = lo | ((uint16_t)hi << 8);
             cpu->memptr = *dst;
         }
@@ -681,8 +681,8 @@ int z80_step(z80_cpu_t *cpu) {
     case Z80_OP_CALL_NN:
         /* push return address */
         cpu->sp = (cpu->sp - 2) & 0xFFFF;
-        cpu->mem[cpu->sp]     = (cpu->pc) & 0xFF;
-        cpu->mem[cpu->sp + 1] = (cpu->pc >> 8) & 0xFF;
+        z80_mem_w(cpu, cpu->sp, (uint8_t)(cpu->pc & 0xFF));
+        z80_mem_w(cpu, (uint16_t)(cpu->sp + 1), (uint8_t)(cpu->pc >> 8));
         cpu->pc = dec.imm16;
         cpu->memptr = dec.imm16;
 
@@ -718,8 +718,8 @@ int z80_step(z80_cpu_t *cpu) {
         cpu->memptr = dec.imm16;
         if (cond_true(cpu, dec.cc)) {
             cpu->sp = (cpu->sp - 2) & 0xFFFF;
-            cpu->mem[cpu->sp]     = (cpu->pc) & 0xFF;
-            cpu->mem[cpu->sp + 1] = (cpu->pc >> 8) & 0xFF;
+            z80_mem_w(cpu, cpu->sp, (uint8_t)(cpu->pc & 0xFF));
+            z80_mem_w(cpu, (uint16_t)(cpu->sp + 1), (uint8_t)(cpu->pc >> 8));
             cpu->pc = dec.imm16;
         }
         break;
@@ -753,8 +753,8 @@ int z80_step(z80_cpu_t *cpu) {
                 v = read_rr(cpu, dec.reg1);
             }
             cpu->sp = (cpu->sp - 2) & 0xFFFF;
-            cpu->mem[cpu->sp]     = v & 0xFF;
-            cpu->mem[(cpu->sp + 1) & 0xFFFF] = v >> 8;
+            z80_mem_w(cpu, cpu->sp, (uint8_t)(v & 0xFF));
+            z80_mem_w(cpu, (uint16_t)(cpu->sp + 1), (uint8_t)(v >> 8));
         }
         break;
 
@@ -845,8 +845,8 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_RST:
         cpu->sp = (cpu->sp - 2) & 0xFFFF;
-        cpu->mem[cpu->sp]     = cpu->pc & 0xFF;
-        cpu->mem[(cpu->sp + 1) & 0xFFFF] = cpu->pc >> 8;
+        z80_mem_w(cpu, cpu->sp, (uint8_t)(cpu->pc & 0xFF));
+        z80_mem_w(cpu, (uint16_t)(cpu->sp + 1), (uint8_t)(cpu->pc >> 8));
         cpu->pc = dec.imm8;
         cpu->memptr = cpu->pc;
         break;
@@ -875,7 +875,7 @@ int z80_step(z80_cpu_t *cpu) {
             uint8_t last_byte = 0;
             while (cpu->bc != 0) {
                 last_byte = cpu->mem[cpu->hl & 0xFFFF];
-                cpu->mem[cpu->de & 0xFFFF] = last_byte;
+                z80_mem_w(cpu, cpu->de, last_byte);
                 cpu->hl = (cpu->hl + incr) & 0xFFFF;
                 cpu->de = (cpu->de + incr) & 0xFFFF;
                 cpu->bc = (cpu->bc - 1) & 0xFFFF;
@@ -946,8 +946,8 @@ int z80_step(z80_cpu_t *cpu) {
         {
             /* ED 43/53/63/73 — LD (nn),rr  for BC/DE/HL/SP */
             uint16_t v = (dec.reg1 == 3) ? cpu->sp : read_rr(cpu, dec.reg1);
-            cpu->mem[dec.imm16 & 0xFFFF]       = v & 0xFF;
-            cpu->mem[(dec.imm16 + 1) & 0xFFFF] = (v >> 8) & 0xFF;
+            z80_mem_w(cpu, dec.imm16, (uint8_t)(v & 0xFF));
+            z80_mem_w(cpu, (uint16_t)(dec.imm16 + 1), (uint8_t)(v >> 8));
             cpu->memptr = (uint16_t)(dec.imm16 + 1);
         }
         break;
@@ -989,8 +989,8 @@ int z80_step(z80_cpu_t *cpu) {
             uint16_t v = (dec.prefix == 0xDD) ? cpu->ix
                        : (dec.prefix == 0xFD) ? cpu->iy
                        : cpu->hl;
-            cpu->mem[dec.imm16 & 0xFFFF]       = v & 0xFF;
-            cpu->mem[(dec.imm16 + 1) & 0xFFFF] = v >> 8;
+            z80_mem_w(cpu, dec.imm16, (uint8_t)(v & 0xFF));
+            z80_mem_w(cpu, (uint16_t)(dec.imm16 + 1), (uint8_t)(v >> 8));
             cpu->memptr = (uint16_t)(dec.imm16 + 1);
         }
         break;
@@ -1084,7 +1084,7 @@ int z80_step(z80_cpu_t *cpu) {
         {
             int incr = (dec.type == Z80_OP_LDI) ? 1 : -1;
             uint8_t v = cpu->mem[cpu->hl & 0xFFFF];
-            cpu->mem[cpu->de & 0xFFFF] = v;
+            z80_mem_w(cpu, cpu->de, v);
             cpu->hl = (cpu->hl + incr) & 0xFFFF;
             cpu->de = (cpu->de + incr) & 0xFFFF;
             cpu->bc = (cpu->bc - 1) & 0xFFFF;
@@ -1118,7 +1118,7 @@ int z80_step(z80_cpu_t *cpu) {
                 new_m = (m_lo << 4) | a_lo;
             }
             cpu->a = new_a;
-            cpu->mem[cpu->hl & 0xFFFF] = new_m;
+            z80_mem_w(cpu, cpu->hl, new_m);
             uint8_t f = (cpu->f & Z80_FLAG_C) | xy_from(new_a);
             if (new_a == 0) f |= Z80_FLAG_Z;
             if (new_a & 0x80) f |= Z80_FLAG_S;
@@ -1284,7 +1284,7 @@ int z80_step(z80_cpu_t *cpu) {
          * on this side effect being visible in the registers. */
         if (!is_bit) {
             if (mem) {
-                cpu->mem[addr & 0xFFFF] = result;
+                z80_mem_w(cpu, addr, result);
                 if (indexed && r != 6) {
                     uint8_t *p = reg8_ptr(cpu, r);
                     if (p) *p = result;

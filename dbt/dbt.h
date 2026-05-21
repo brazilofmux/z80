@@ -56,7 +56,9 @@ _Static_assert(sizeof(z80_block_entry_t) == 16, "z80_block_entry_t must be 16 by
 /* Upper bound on guest instructions per translated block. The backend
  * stops emitting earlier when it hits any control-flow or untranslatable
  * op. 64 is plenty for typical CP/M basic blocks. */
+#ifndef MAX_BLOCK_INSNS
 #define MAX_BLOCK_INSNS    64
+#endif
 
 #define CODE_BUF_SIZE      (64 * 1024 * 1024)   /* 64 MB JIT buffer */
 
@@ -86,8 +88,18 @@ typedef struct {
     uint64_t interp_fallback_insns;
     uint64_t jit_block_entries;
     uint64_t smc_invalidations;
+    uint64_t verify_blocks_checked;
 
     int trace;
+    int verify;          /* -V: run a parallel interp shadow and diff each block */
+
+    /* Shadow state used only when verify != 0. The shadow cpu + memory
+     * run in lockstep with the real cpu: every time the JIT advances by
+     * N instructions, we step the interp N times on the shadow and
+     * compare. No per-block memcpy that way — divergence diff cost is
+     * just register comparison. */
+    z80_cpu_t shadow_cpu;
+    uint8_t  *shadow_mem;        /* 64 KB, allocated lazily */
 } z80_dbt_t;
 
 /* ----------------------------------------------------------------------

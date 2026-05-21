@@ -301,4 +301,11 @@ void z80_run(z80_cpu_t *cpu);
 /* Helper: compute the real F byte from lazy state (DBT calls this when needed) */
 uint8_t z80_materialize_flags(z80_cpu_t *cpu);
 
+/* Guest memory write that ALSO informs the DBT's SMC tracker so a write
+ * into a JIT-cached block invalidates the affected cache entries. When
+ * the DBT isn't active (interp-only run), this is just the store; when
+ * it is, a 16-bit address-masked invalidation fires for hits in the
+ * code bitmap. ALL interp memory writes must route through here. */
+void z80_mem_w(z80_cpu_t *cpu, uint16_t addr, uint8_t val);
+
 #endif /* Z80_H */

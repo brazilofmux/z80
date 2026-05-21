@@ -59,6 +59,78 @@ void dbt_cleanup(z80_dbt_t *dbt) {
         munmap(dbt->code_buf, CODE_BUF_SIZE);
         dbt->code_buf = NULL;
     }
+    free(dbt->shadow_mem);
+    dbt->shadow_mem = NULL;
+}
+
+/* ----------------------------------------------------------------------
+ * -V shadow-verify support
+ * ---------------------------------------------------------------------- */
+
+/* Compare the registers that hold guest-visible state. We deliberately
+ * skip the DBT-only fields (mem, mem_size, block_cache, dbt, insn_count
+ * stats, etc.) and memptr — JIT-translated mem ops don't currently
+ * maintain it (documented gap), so flagging it on every block would
+ * drown out actual flag-computation bugs.
+ *
+ * Returns 1 if equal. */
+static int cpu_regs_equal(const z80_cpu_t *a, const z80_cpu_t *b) {
+    if (a->af != b->af) return 0;
+    if (a->bc != b->bc) return 0;
+    if (a->de != b->de) return 0;
+    if (a->hl != b->hl) return 0;
+    if (a->af_ != b->af_) return 0;
+    if (a->bc_ != b->bc_) return 0;
+    if (a->de_ != b->de_) return 0;
+    if (a->hl_ != b->hl_) return 0;
+    if (a->ix != b->ix) return 0;
+    if (a->iy != b->iy) return 0;
+    if (a->sp != b->sp) return 0;
+    if (a->pc != b->pc) return 0;
+    if (a->i != b->i) return 0;
+    if (a->r != b->r) return 0;
+    if (a->iff1 != b->iff1) return 0;
+    if (a->iff2 != b->iff2) return 0;
+    if (a->im != b->im) return 0;
+    if (a->q != b->q) return 0;
+#if 0
+    /* JIT-translated mem ops don't currently maintain memptr. Flip this
+     * to 1 to chase memptr divergence specifically. */
+    if (a->memptr != b->memptr) return 0;
+#endif
+    return 1;
+}
+
+static void dump_regs(FILE *out, const char *tag, const z80_cpu_t *c) {
+    fprintf(out, "  %s: PC=%04X SP=%04X AF=%04X BC=%04X DE=%04X HL=%04X "
+                 "IX=%04X IY=%04X AF'=%04X memptr=%04X q=%u\n",
+            tag, c->pc, c->sp, c->af, c->bc, c->de, c->hl,
+            c->ix, c->iy, c->af_, c->memptr, c->q);
+}
+
+static int verify_first_diff(const z80_cpu_t *jit, const z80_cpu_t *interp) {
+    /* Print one-line "what differs" hint. */
+    if (jit->af != interp->af)
+        fprintf(stderr, "    AF differs: jit=%04X interp=%04X\n", jit->af, interp->af);
+    if (jit->bc != interp->bc)
+        fprintf(stderr, "    BC differs: jit=%04X interp=%04X\n", jit->bc, interp->bc);
+    if (jit->de != interp->de)
+        fprintf(stderr, "    DE differs: jit=%04X interp=%04X\n", jit->de, interp->de);
+    if (jit->hl != interp->hl)
+        fprintf(stderr, "    HL differs: jit=%04X interp=%04X\n", jit->hl, interp->hl);
+    if (jit->ix != interp->ix)
+        fprintf(stderr, "    IX differs: jit=%04X interp=%04X\n", jit->ix, interp->ix);
+    if (jit->iy != interp->iy)
+        fprintf(stderr, "    IY differs: jit=%04X interp=%04X\n", jit->iy, interp->iy);
+    if (jit->sp != interp->sp)
+        fprintf(stderr, "    SP differs: jit=%04X interp=%04X\n", jit->sp, interp->sp);
+    if (jit->pc != interp->pc)
+        fprintf(stderr, "    PC differs: jit=%04X interp=%04X\n", jit->pc, interp->pc);
+    if (jit->memptr != interp->memptr)
+        fprintf(stderr, "    memptr differs: jit=%04X interp=%04X\n", jit->memptr, interp->memptr);
+    if (jit->q != interp->q)
+        fprintf(stderr, "    q differs: jit=%u interp=%u\n", jit->q, interp->q);
+    return 1;
 }
 
 /* Trampoline signature: called from C with the register-binding
@@ -70,6 +142,19 @@ typedef void (*trampoline_fn_t)(z80_cpu_t *cpu, uint8_t *mem,
 int dbt_run(z80_dbt_t *dbt) {
     z80_cpu_t *cpu = dbt->cpu;
     trampoline_fn_t trampoline = (trampoline_fn_t)(void *)dbt->code_buf;
+
+    /* Lazily initialise the parallel shadow on first -V entry. */
+    if (dbt->verify && !dbt->shadow_mem) {
+        dbt->shadow_mem = calloc(1, 65536);
+        if (!dbt->shadow_mem) {
+            fprintf(stderr, "dbt_run: cannot allocate shadow memory\n");
+            return -1;
+        }
+        memcpy(dbt->shadow_mem, cpu->mem, 65536);
+        dbt->shadow_cpu = *cpu;
+        dbt->shadow_cpu.mem = dbt->shadow_mem;
+        dbt->shadow_cpu.dbt = NULL;       /* shadow must not recurse into JIT */
+    }
 
     for (;;) {
         /* Mirror main.c's "RET to warm boot" termination check. */
@@ -95,6 +180,94 @@ int dbt_run(z80_dbt_t *dbt) {
         }
 
         if (code) {
+            uint16_t entry_pc = cpu->pc;
+
+            if (dbt->verify) {
+                uint64_t insns_before = cpu->insn_count;
+                z80_cpu_t pre = *cpu;
+                z80_cpu_t shadow_pre = dbt->shadow_cpu;
+
+                /* Sanity: the shadow MUST mirror the real cpu pre-block
+                 * (lockstep invariant). If it doesn't, the prior block
+                 * silently diverged — bail with a focused report. */
+                int pre_regs_ok = cpu_regs_equal(&pre, &shadow_pre);
+                int pre_mem_ok  = memcmp(cpu->mem, dbt->shadow_mem, 65536) == 0;
+                if (!pre_regs_ok || !pre_mem_ok) {
+                    fprintf(stderr,
+                            "\n[verify] lockstep broken BEFORE JIT block at PC=%04X "
+                            "(pre_regs_ok=%d pre_mem_ok=%d)\n",
+                            entry_pc, pre_regs_ok, pre_mem_ok);
+                    dump_regs(stderr, "real  ", &pre);
+                    dump_regs(stderr, "shadow", &shadow_pre);
+                    if (!pre_regs_ok) verify_first_diff(&pre, &shadow_pre);
+                    if (!pre_mem_ok) {
+                        int shown = 0;
+                        for (int i = 0; i < 65536 && shown < 8; i++) {
+                            if (cpu->mem[i] != dbt->shadow_mem[i]) {
+                                fprintf(stderr,
+                                        "    mem[%04X] differs: real=%02X shadow=%02X\n",
+                                        i, cpu->mem[i], dbt->shadow_mem[i]);
+                                shown++;
+                            }
+                        }
+                    }
+                    return -1;
+                }
+
+                /* Run the JIT block on the real cpu/mem. */
+                dbt->jit_block_entries++;
+                trampoline(cpu, cpu->mem, code, dbt->cache, dbt->code_bitmap);
+
+                uint64_t jit_insns = cpu->insn_count - insns_before;
+                z80_cpu_t post_jit = *cpu;
+
+                /* Step the parallel shadow forward by the same insn count. */
+                for (uint64_t i = 0; i < jit_insns; i++) {
+                    int rc = z80_step(&dbt->shadow_cpu);
+                    if (rc != 0) break;
+                }
+                dbt->verify_blocks_checked++;
+
+                int regs_ok = cpu_regs_equal(&post_jit, &dbt->shadow_cpu);
+                int mem_ok  = memcmp(cpu->mem, dbt->shadow_mem, 65536) == 0;
+                if (!regs_ok || !mem_ok) {
+                    fprintf(stderr,
+                            "\n[verify] divergence after JIT block at PC=%04X (%llu insns)\n",
+                            entry_pc, (unsigned long long)jit_insns);
+                    dump_regs(stderr, "pre   ", &pre);
+                    dump_regs(stderr, "JIT   ", &post_jit);
+                    dump_regs(stderr, "shadow", &dbt->shadow_cpu);
+                    if (!regs_ok) verify_first_diff(&post_jit, &dbt->shadow_cpu);
+                    if (!mem_ok) {
+                        int shown = 0;
+                        for (int i = 0; i < 65536 && shown < 8; i++) {
+                            if (cpu->mem[i] != dbt->shadow_mem[i]) {
+                                fprintf(stderr,
+                                        "    mem[%04X] differs: jit=%02X shadow=%02X\n",
+                                        i, cpu->mem[i], dbt->shadow_mem[i]);
+                                shown++;
+                            }
+                        }
+                    }
+                    /* Dump the bytes of the executed block so we can
+                     * see if JIT-translated code drifted from what's
+                     * currently in memory (SMC suspicion). */
+                    fprintf(stderr, "    block bytes (from real mem):");
+                    for (int i = 0; i < 48; i++) {
+                        if ((i & 0xF) == 0) fprintf(stderr, "\n      %04X:", entry_pc + i);
+                        fprintf(stderr, " %02X", cpu->mem[(entry_pc + i) & 0xFFFF]);
+                    }
+                    fprintf(stderr, "\n    block bytes (from shadow mem):");
+                    for (int i = 0; i < 48; i++) {
+                        if ((i & 0xF) == 0) fprintf(stderr, "\n      %04X:", entry_pc + i);
+                        fprintf(stderr, " %02X", dbt->shadow_mem[(entry_pc + i) & 0xFFFF]);
+                    }
+                    fprintf(stderr, "\n");
+                    return -1;
+                }
+                continue;
+            }
+
             dbt->jit_block_entries++;
             trampoline(cpu, cpu->mem, code, dbt->cache, dbt->code_bitmap);
             continue;
@@ -109,6 +282,13 @@ int dbt_run(z80_dbt_t *dbt) {
         }
         if (rc > 0) {
             return 0;   /* clean CP/M exit */
+        }
+        if (dbt->verify) {
+            /* Keep the shadow in lockstep on the interp-fallback path too —
+             * the real cpu just advanced via z80_step, so the shadow must
+             * advance the same one step. */
+            int srx = z80_step(&dbt->shadow_cpu);
+            (void)srx;
         }
     }
 }

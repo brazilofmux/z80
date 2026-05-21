@@ -45,6 +45,7 @@ static void usage(const char *prog) {
     printf("Options:\n");
     printf("  -i       Force interpreter (default)\n");
     printf("  -j       Use the JIT (DBT) — falls back to interp if unavailable\n");
+    printf("  -V       JIT + shadow-verify each block against the interp\n");
     printf("  -s       Show stats on exit\n");
     printf("  -d       Print BDOS/BIOS/disk startup tracing\n");
     printf("  -T       Trace block ops (periodic register dumps)\n");
@@ -58,6 +59,7 @@ static void usage(const char *prog) {
 int main(int argc, char **argv) {
     int show_stats = 0;
     int use_jit = 0;
+    int verify = 0;
     const char *disk_root = NULL;
     const char *prog = NULL;
 
@@ -78,6 +80,9 @@ int main(int argc, char **argv) {
             use_jit = 0;
         } else if (strcmp(argv[i], "-j") == 0) {
             use_jit = 1;
+        } else if (strcmp(argv[i], "-V") == 0) {
+            use_jit = 1;
+            verify = 1;
         } else if (strcmp(argv[i], "-d") == 0) {
             cpm_debug = 1;
         } else if (strcmp(argv[i], "-T") == 0) {
@@ -189,6 +194,7 @@ int main(int argc, char **argv) {
             dbt = NULL;
             use_jit = 0;
         }
+        if (dbt) dbt->verify = verify;
     }
 
     if (use_jit) {
