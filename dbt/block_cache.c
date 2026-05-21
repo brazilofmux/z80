@@ -51,15 +51,20 @@ void dbt_mark_block_bytes(z80_dbt_t *dbt, uint16_t start, uint32_t end) {
 #define SMC_INVAL_WINDOW 320
 
 static void dbt_invalidate_for_store(z80_dbt_t *dbt, uint16_t addr) {
+    /* Invalidate cache entries whose start PC falls in the window —
+     * any of them might cover byte `addr`. We do NOT touch the bitmap
+     * here: clearing it would let a subsequent store on the same byte
+     * silently skip the helper (false negative), which is exactly the
+     * stale-translation bug zexdoc's repeated test_op patching hit.
+     *
+     * False positives (bitmap still 1 for a byte whose block was just
+     * invalidated; next store fires the helper unnecessarily, helper
+     * sees the cache slot already empty and does no extra work) are
+     * the price. */
     for (int k = 0; k < SMC_INVAL_WINDOW; k++) {
         uint16_t p = (uint16_t)(addr - k);
         dbt->cache[p & BLOCK_CACHE_MASK].guest_pc    = BLOCK_EMPTY_PC;
         dbt->cache[p & BLOCK_CACHE_MASK].native_code = NULL;
-        dbt->code_bitmap[p] = 0;
-    }
-    for (int k = 1; k < SMC_INVAL_WINDOW; k++) {
-        uint16_t p = (uint16_t)(addr + k);
-        dbt->code_bitmap[p] = 0;
     }
     dbt->smc_invalidations++;
 }

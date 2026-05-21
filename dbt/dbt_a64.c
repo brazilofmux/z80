@@ -92,6 +92,7 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
 #define OFF_SP         offsetof(z80_cpu_t, sp)
 #define OFF_PC         offsetof(z80_cpu_t, pc)
 #define OFF_Q          offsetof(z80_cpu_t, q)
+#define OFF_MEMPTR     offsetof(z80_cpu_t, memptr)
 #define OFF_INSN_COUNT offsetof(z80_cpu_t, insn_count)
 
 /* Map a Z80 reg code 0..7 (B,C,D,E,H,L,(HL),A) to its byte offset
@@ -179,6 +180,51 @@ static void emit_add_mask16(emit_t *e, a64_reg_t dst, a64_reg_t src, uint32_t de
 static void emit_sub_mask16(emit_t *e, a64_reg_t dst, a64_reg_t src, uint32_t delta) {
     emit_sub_w32_imm(e, dst, src, delta);
     (void)emit_and_w32_imm(e, dst, dst, 0xFFFF);
+}
+
+/* cpu->memptr = imm16. Compiles to MOVZ + STRH (2 host insns). Used by
+ * the "memptr = nn+1" / "memptr = target" cases where the value is
+ * known at codegen time. */
+static void emit_set_memptr_imm(emit_t *e, uint16_t value) {
+    emit_movz_w32(e, A64_W9, value, 0);
+    emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
+}
+
+/* cpu->memptr = (A << 8) | (low8_imm)  — the LD (nn),A / LD (BC|DE),A
+ * memptr-quirk form. low8_imm is the static "(addr + 1) & 0xFF" part.
+ *
+ * Goes via a scratch reg + ORR-reg rather than ORR-imm because most
+ * 8-bit constants aren't encodable as an AArch64 logical immediate
+ * (0x66 = 0110_0110 was the original casualty here). */
+static void emit_set_memptr_quirk_imm(emit_t *e, uint8_t low8_imm) {
+    emit_ldrb_imm(e, A64_W9, A64_W19, OFF_A);
+    emit_lsl_w32_imm(e, A64_W9, A64_W9, 8);
+    if (low8_imm != 0) {
+        emit_movz_w32(e, A64_W12, low8_imm, 0);
+        emit_orr_w32(e, A64_W9, A64_W9, A64_W12);
+    }
+    emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
+}
+
+/* cpu->memptr = (A << 8) | ((rr_value + 1) & 0xFF). Used for the
+ * dynamic LD (BC),A / LD (DE),A — the address comes from a register
+ * pair, so the +1-and-mask must run at execution time. */
+static void emit_set_memptr_quirk_rr(emit_t *e, uint32_t off_rr) {
+    emit_ldrh_imm(e, A64_W12, A64_W19, off_rr);
+    emit_add_w32_imm(e, A64_W12, A64_W12, 1);
+    (void)emit_and_w32_imm(e, A64_W12, A64_W12, 0xFF);
+    emit_ldrb_imm(e, A64_W9, A64_W19, OFF_A);
+    emit_lsl_w32_imm(e, A64_W9, A64_W9, 8);
+    emit_orr_w32(e, A64_W9, A64_W9, A64_W12);
+    emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
+}
+
+/* cpu->memptr = (rr + 1) & 0xFFFF. Used by LD A,(BC|DE) — straight
+ * "addr+1" memptr semantics, no XY quirk. */
+static void emit_set_memptr_rr_plus_one(emit_t *e, uint32_t off_rr) {
+    emit_ldrh_imm(e, A64_W9, A64_W19, off_rr);
+    emit_add_w32_imm(e, A64_W9, A64_W9, 1);
+    emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
 }
 
 /* Per-block prologue. The trampoline BLRs in with X30 (LR) pointing at
@@ -402,24 +448,28 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_ldrh_imm(e, A64_W10, A64_W19, OFF_BC);
         emit_guest_loadb_w9_at_w10(e);
         emit_strb_imm(e, A64_W9, A64_W19, OFF_A);
+        emit_set_memptr_rr_plus_one(e, OFF_BC);
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_A_DE: {
         emit_ldrh_imm(e, A64_W10, A64_W19, OFF_DE);
         emit_guest_loadb_w9_at_w10(e);
         emit_strb_imm(e, A64_W9, A64_W19, OFF_A);
+        emit_set_memptr_rr_plus_one(e, OFF_DE);
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_BC_A: {
         emit_ldrh_imm(e, A64_W10, A64_W19, OFF_BC);
         emit_ldrb_imm(e, A64_W9,  A64_W19, OFF_A);
         emit_guest_storeb_w9_at_w10_smc(e);
+        emit_set_memptr_quirk_rr(e, OFF_BC);
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_DE_A: {
         emit_ldrh_imm(e, A64_W10, A64_W19, OFF_DE);
         emit_ldrb_imm(e, A64_W9,  A64_W19, OFF_A);
         emit_guest_storeb_w9_at_w10_smc(e);
+        emit_set_memptr_quirk_rr(e, OFF_DE);
         return OP_FALL_THROUGH;
     }
 
@@ -427,12 +477,14 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_load_imm16_into(e, A64_W10, dec->imm16);
         emit_guest_loadb_w9_at_w10(e);
         emit_strb_imm(e, A64_W9, A64_W19, OFF_A);
+        emit_set_memptr_imm(e, (uint16_t)(dec->imm16 + 1));
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_NN_A: {
         emit_load_imm16_into(e, A64_W10, dec->imm16);
         emit_ldrb_imm(e, A64_W9, A64_W19, OFF_A);
         emit_guest_storeb_w9_at_w10_smc(e);
+        emit_set_memptr_quirk_imm(e, (uint8_t)((dec->imm16 + 1) & 0xFF));
         return OP_FALL_THROUGH;
     }
 
@@ -448,6 +500,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_load_imm16_into(e, A64_W10, nn1);
         emit_guest_loadb_w9_at_w10(e);
         emit_strb_imm(e, A64_W9, A64_W19, OFF_H);
+        emit_set_memptr_imm(e, nn1);
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_NN_HL: {
@@ -459,6 +512,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_load_imm16_into(e, A64_W10, nn1);
         emit_ldrb_imm(e, A64_W9, A64_W19, OFF_H);
         emit_guest_storeb_w9_at_w10_smc(e);
+        emit_set_memptr_imm(e, nn1);
         return OP_FALL_THROUGH;
     }
 
@@ -590,20 +644,22 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
     }
 
     case Z80_OP_JP_NN: {
-        /* Block ends; epilogue uses dec->imm16 as the final PC. */
+        /* Block ends; epilogue uses dec->imm16 as the final PC.
+         * memptr = nn (the jump target). */
         (void)pc_after;
         emit_movz_w32(e, A64_W9, dec->imm16, 0);
         emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
         return OP_ENDS_BLOCK;
     }
 
     case Z80_OP_JR_E: {
         /* JR e: target = pc_after + (int8_t)disp.
-         * The decoder stores the signed displacement in dec->disp and
-         * has already added the instruction size to pc_after for us. */
+         * memptr = target (always set on JR, unconditional). */
         uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
         emit_movz_w32(e, A64_W9, target, 0);
         emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
         return OP_ENDS_BLOCK;
     }
 
@@ -613,6 +669,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
          *   mem[sp]     = pc_after & 0xFF
          *   mem[sp + 1] = (pc_after >> 8) & 0xFF        (sp+1 also masked)
          *   pc          = target                          (block ends)
+         *   memptr      = target
          *
          * Trap targets (BDOS/WBOOT/BIOS) were filtered by can_translate
          * — this case only runs for "regular" callees. */
@@ -629,9 +686,10 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_movz_w32(e, A64_W9, (pc_after >> 8) & 0xFF, 0);
         emit_strb_reg_uxtw(e, A64_W9, A64_W20, A64_W12);
 
-        /* pc = target */
+        /* pc = target; memptr = target. */
         emit_movz_w32(e, A64_W9, dec->imm16, 0);
         emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
         return OP_ENDS_BLOCK;
     }
 
@@ -640,6 +698,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
          *   pc.lo = mem[sp]
          *   pc.hi = mem[(sp + 1) & 0xFFFF]
          *   sp    = (sp + 2) & 0xFFFF
+         *   memptr = popped pc
          *
          * Popped pc == 0 is the classic CP/M warm-boot termination;
          * dbt_run's top-of-loop pc==0 && insn_count>4 check catches it,
@@ -658,6 +717,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_lsl_w32_imm(e, A64_W10, A64_W10, 8);
         emit_orr_w32(e, A64_W9, A64_W9, A64_W10);
         emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
 
         /* sp += 2, masked */
         emit_add_mask16(e, A64_W11, A64_W11, 2);

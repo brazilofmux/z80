@@ -69,11 +69,7 @@ void dbt_cleanup(z80_dbt_t *dbt) {
 
 /* Compare the registers that hold guest-visible state. We deliberately
  * skip the DBT-only fields (mem, mem_size, block_cache, dbt, insn_count
- * stats, etc.) and memptr — JIT-translated mem ops don't currently
- * maintain it (documented gap), so flagging it on every block would
- * drown out actual flag-computation bugs.
- *
- * Returns 1 if equal. */
+ * stats, etc.). Returns 1 if equal. */
 static int cpu_regs_equal(const z80_cpu_t *a, const z80_cpu_t *b) {
     if (a->af != b->af) return 0;
     if (a->bc != b->bc) return 0;
@@ -93,11 +89,7 @@ static int cpu_regs_equal(const z80_cpu_t *a, const z80_cpu_t *b) {
     if (a->iff2 != b->iff2) return 0;
     if (a->im != b->im) return 0;
     if (a->q != b->q) return 0;
-#if 0
-    /* JIT-translated mem ops don't currently maintain memptr. Flip this
-     * to 1 to chase memptr divergence specifically. */
     if (a->memptr != b->memptr) return 0;
-#endif
     return 1;
 }
 
