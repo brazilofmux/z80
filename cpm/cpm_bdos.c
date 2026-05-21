@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <termios.h>
 
+int cpm_debug = 0;
+
 /* We will wire this into the interpreter's CALL handling.
  * For the DBT we will later make CALL 5 a fast path that exits the
  * translated block with a special "BDOS" exit reason.
@@ -13,7 +15,7 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
 
     /* Light startup logging to help bring-up of real binaries (first ~30 calls) */
     static int early_calls = 0;
-    if (early_calls < 30) {
+    if (cpm_debug && early_calls < 30) {
         early_calls++;
         if (func == 33 || func == 34) {
             /* Dump the random record the game is asking for */

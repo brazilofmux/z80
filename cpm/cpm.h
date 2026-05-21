@@ -106,6 +106,9 @@ void cpm_install(z80_cpu_t *cpu);
  */
 int cpm_bdos_dispatch(z80_cpu_t *cpu);
 
+/* When non-zero, emit BDOS/BIOS startup tracing on stderr. Set by main.c -d. */
+extern int cpm_debug;
+
 /* BIOS support */
 void cpm_install_bios(z80_cpu_t *cpu);
 int  cpm_bios_dispatch(z80_cpu_t *cpu);

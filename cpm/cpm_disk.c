@@ -356,17 +356,18 @@ int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
         memcpy(&cpu->mem[current_dma], disk_io_buf, n);
     }
     if (n == 0) {
-        fprintf(stderr, "  [random read] rec=%u returned EOF (A=1)\n", rec);
+        if (cpm_debug)
+            fprintf(stderr, "  [random read] rec=%u returned EOF (A=1)\n", rec);
         cpu->a = 1; /* EOF / record not written */
         return 1;
     }
-    if (n < 128) {
+    if (n < 128 && cpm_debug) {
         fprintf(stderr, "  [random read] rec=%u short read (%zu bytes)\n", rec, n);
     }
 
     /* One-time diagnostic: show the header the game sees on the very first record */
     static int first_rec_dumped = 0;
-    if (!first_rec_dumped && rec == 0) {
+    if (cpm_debug && !first_rec_dumped && rec == 0) {
         first_rec_dumped = 1;
         fprintf(stderr, "  [Zork header @DMA] ");
         for (int i = 0; i < 16; i++)
@@ -406,7 +407,8 @@ int cpm_bdos_random_write(z80_cpu_t *cpu, uint16_t fcb_addr)
 
     size_t n = fwrite(disk_io_buf, 1, 128, fp);
     if (n != 128) {
-        fprintf(stderr, "  [random write] rec=%u short write\n", rec);
+        if (cpm_debug)
+            fprintf(stderr, "  [random write] rec=%u short write\n", rec);
         cpu->a = 2;
         return 1;
     }

@@ -44,6 +44,8 @@ static void usage(const char *prog) {
     printf("Options:\n");
     printf("  -i       Force interpreter (default for now)\n");
     printf("  -s       Show stats on exit\n");
+    printf("  -d       Print BDOS/BIOS/disk startup tracing\n");
+    printf("  -T       Trace block ops (periodic register dumps)\n");
     printf("  -h       This help\n\n");
     printf("Example:\n");
     printf("  %s tests/hello.com\n\n", prog);
@@ -69,6 +71,8 @@ int main(int argc, char **argv) {
             return 0;
         } else if (strcmp(argv[i], "-s") == 0) {
             show_stats = 1;
+        } else if (strcmp(argv[i], "-d") == 0) {
+            cpm_debug = 1;
         } else if (strcmp(argv[i], "-T") == 0) {
             trace_block_ops = 1;
         } else if (argv[i][0] != '-') {
@@ -146,7 +150,7 @@ int main(int argc, char **argv) {
     }
 
     /* Helpful for the common "just give me the directory" usage */
-    if (disk_root && !strstr(final_prog, "/")) {
+    if (cpm_debug && disk_root && !strstr(final_prog, "/")) {
         fprintf(stderr, "Running %s from disk image '%s'\n", final_prog, disk_root);
     }
 
