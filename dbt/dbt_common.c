@@ -308,4 +308,6 @@ void dbt_print_stats(z80_dbt_t *dbt, FILE *out) {
             (unsigned long long)dbt->interp_fallback_insns);
     fprintf(out, "  SMC invalidations:      %llu\n",
             (unsigned long long)dbt->smc_invalidations);
+    fprintf(out, "  max block bytes:        %u\n",
+            (unsigned)dbt->max_block_bytes);
 }

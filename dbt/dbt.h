@@ -90,6 +90,12 @@ typedef struct {
     uint64_t smc_invalidations;
     uint64_t verify_blocks_checked;
 
+    /* Largest byte-length of any block currently in the cache. Used as the
+     * SMC invalidation window: a store at A might invalidate any block
+     * whose start is in [A - max_block_bytes + 1, A]. Initially 0; updated
+     * monotonically by dbt_mark_block_bytes(). Reset on full cache wipe. */
+    uint32_t max_block_bytes;
+
     int trace;
     int verify;          /* -V: run a parallel interp shadow and diff each block */
 

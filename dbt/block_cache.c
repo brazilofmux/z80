@@ -36,32 +36,34 @@ void dbt_cache_invalidate_all(z80_dbt_t *dbt) {
         dbt->cache[i].native_code = NULL;
     }
     memset(dbt->code_bitmap, 0, sizeof(dbt->code_bitmap));
+    dbt->max_block_bytes = 0;
 }
 
 void dbt_mark_block_bytes(z80_dbt_t *dbt, uint16_t start, uint32_t end) {
+    uint32_t bytes = (end - start) & 0xFFFF;
+    if (bytes > dbt->max_block_bytes) dbt->max_block_bytes = bytes;
     for (uint32_t a = start; a < end; a++) {
         dbt->code_bitmap[a & 0xFFFF] = 1;
     }
 }
 
-/* SMC_INVAL_WINDOW: upper bound on bytes a single translated block can
- * cover; a store at A might invalidate any block-start in
- * [A - SMC_INVAL_WINDOW + 1, A]. Kept in sync with the value in
- * dbt_flags.c (z80_jit_post_store uses the same window). */
-#define SMC_INVAL_WINDOW 320
-
 static void dbt_invalidate_for_store(z80_dbt_t *dbt, uint16_t addr) {
-    /* Invalidate cache entries whose start PC falls in the window —
-     * any of them might cover byte `addr`. We do NOT touch the bitmap
-     * here: clearing it would let a subsequent store on the same byte
-     * silently skip the helper (false negative), which is exactly the
-     * stale-translation bug zexdoc's repeated test_op patching hit.
+    /* Invalidate cache entries whose start PC falls in the window
+     * [addr - max_block_bytes + 1, addr] — any of them might cover byte
+     * `addr`. The window is sized to the actual longest translated block,
+     * not MAX_BLOCK_INSNS * worst-case-bytes-per-insn, so workloads with
+     * short basic blocks (typical CP/M) pay far less per store than a
+     * fixed 320-byte sweep would cost.
      *
-     * False positives (bitmap still 1 for a byte whose block was just
-     * invalidated; next store fires the helper unnecessarily, helper
-     * sees the cache slot already empty and does no extra work) are
-     * the price. */
-    for (int k = 0; k < SMC_INVAL_WINDOW; k++) {
+     * We do NOT touch the bitmap here: clearing it would let a subsequent
+     * store on the same byte silently skip the helper (false negative),
+     * which is exactly the stale-translation bug zexdoc's repeated
+     * test_op patching hit. False positives (bitmap still 1 for a byte
+     * whose block was just invalidated; next store fires the helper
+     * unnecessarily, helper sees the cache slot already empty and does
+     * no extra work) are the price. */
+    uint32_t window = dbt->max_block_bytes;
+    for (uint32_t k = 0; k < window; k++) {
         uint16_t p = (uint16_t)(addr - k);
         dbt->cache[p & BLOCK_CACHE_MASK].guest_pc    = BLOCK_EMPTY_PC;
         dbt->cache[p & BLOCK_CACHE_MASK].native_code = NULL;
