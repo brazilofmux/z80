@@ -530,8 +530,12 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_DJNZ:
         return 1;
     case Z80_OP_CB:
-        /* Plain CB-prefix only — DD CB / FD CB is held back. */
-        return dec->prefix == 0xCB;
+        /* Plain CB, DD CB, and FD CB. DD CB / FD CB operate on (IX|IY)+d
+         * with the documented dual writeback (the result goes to memory
+         * AND to register r when r != 6). */
+        return dec->prefix == 0xCB
+            || dec->prefix == 0xDD
+            || dec->prefix == 0xFD;
 
     /* ED-prefix block-copy intrinsics. The interp also runs these
      * atomically, so insn_count parity is preserved. */
@@ -923,17 +927,38 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
 
     /* ---- CB-prefix: rotate/shift (sub<0x40), BIT (0x40..0x7F),
      *      RES (0x80..0xBF), SET (0xC0..0xFF).
+     *
      * Sub-byte layout: family in bits 6..7, n (bit number or rotate kind)
-     * in bits 3..5, reg encoding in bits 0..2 (6 = (HL)). */
+     * in bits 3..5, reg encoding in bits 0..2 (6 = (HL)).
+     *
+     * Three forms by prefix:
+     *   CB     — operand is r or (HL).
+     *   DD CB  — operand is (IX+d); for non-BIT ops, result also writes
+     *            to register r when r != 6 (the documented "dual
+     *            writeback" undocumented behaviour zex* tests).
+     *   FD CB  — same as DD CB but using IY.
+     *
+     * BIT n,<src> XY source byte:
+     *   register form : the operand value itself
+     *   (HL) form     : memptr.high
+     *   (IX+d) form   : high byte of the computed addr
+     */
     case Z80_OP_CB: {
         uint8_t sub = dec->imm8;
         int     r   = sub & 7;
         int     grp = (sub >> 3) & 7;
         unsigned family = sub >> 6;  /* 0=rot/shift, 1=BIT, 2=RES, 3=SET */
-        int     is_mem = (r == 6);
+        int     indexed = (dec->prefix == 0xDD || dec->prefix == 0xFD);
+        int     is_mem = indexed || (r == 6);
+        /* Dual writeback applies to indexed RES/SET/rot/shift when
+         * r != 6 (r == 6 is the pure memory form). BIT never writes. */
+        int     dual_wb = indexed && r != 6 && family != 1;
 
-        /* W2 = working value. For mem ops, also keep the addr in W10. */
-        if (is_mem) {
+        /* Load val into W2. For mem ops, keep the addr in W10. */
+        if (indexed) {
+            emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+            emit_ldrb_reg_uxtw(e, A64_W2, A64_W20, A64_W10);
+        } else if (r == 6) {
             emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
             emit_ldrb_reg_uxtw(e, A64_W2, A64_W20, A64_W10);
         } else {
@@ -942,8 +967,8 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         }
 
         if (family == 0) {
-            /* Rotate / shift. Call helper(cpu, val); helper returns
-             * new value in W0 and sets cpu->f. */
+            /* Rotate / shift. Call helper(cpu, val); helper returns new
+             * value in W0 and sets cpu->f. */
             static void *const helpers[8] = {
                 (void *)z80_jit_rlc, (void *)z80_jit_rrc,
                 (void *)z80_jit_rl,  (void *)z80_jit_rr,
@@ -952,10 +977,22 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
             };
             emit_mov_w32_w32(e, A64_W1, A64_W2);     /* W1 = val (helper arg) */
             emit_call_helper(e, helpers[grp]);
-            /* Helper clobbered W10; reload it before storeb. */
             if (is_mem) {
+                /* Helper clobbered W10; reload the addr. */
+                if (indexed) {
+                    emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+                } else {
+                    emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
+                }
+                /* Dual-writeback to register FIRST: the SMC helper inside
+                 * the store sequence is allowed to clobber W0, so we
+                 * stash the result to the register slot before that
+                 * window opens. */
+                if (dual_wb) {
+                    int off = reg8_offset(r);
+                    emit_strb_imm(e, A64_W0, A64_W19, (uint32_t)off);
+                }
                 emit_mov_w32_w32(e, A64_W9, A64_W0);
-                emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
                 emit_guest_storeb_w9_at_w10_smc(e);
             } else {
                 int off = reg8_offset(r);
@@ -965,16 +1002,17 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         }
 
         if (family == 1) {
-            /* BIT n,<src>. No write-back. XY source byte:
-             *   register form : the operand value
-             *   (HL) form     : memptr.high */
-            emit_mov_w32_w32(e, A64_W1, A64_W2);     /* val */
-            emit_movz_w32(e, A64_W2, (uint8_t)grp, 0); /* bit number */
-            if (is_mem) {
-                /* W3 = (memptr >> 8) & 0xFF */
+            /* BIT n,<src>. No write-back. */
+            emit_mov_w32_w32(e, A64_W1, A64_W2);         /* val */
+            emit_movz_w32(e, A64_W2, (uint8_t)grp, 0);   /* bit number */
+            if (indexed) {
+                /* xy_byte = high byte of addr (in W10). */
+                emit_lsr_w32_imm(e, A64_W3, A64_W10, 8);
+            } else if (r == 6) {
+                /* xy_byte = memptr.high */
                 emit_ldrb_imm(e, A64_W3, A64_W19, OFF_MEMPTR + 1);
             } else {
-                emit_mov_w32_w32(e, A64_W3, A64_W1);   /* xy_byte = val */
+                emit_mov_w32_w32(e, A64_W3, A64_W1);     /* xy = val */
             }
             emit_call_helper(e, (void *)(uintptr_t)z80_jit_bit);
             return OP_MODIFIES_F;
@@ -982,10 +1020,10 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
 
         /* RES / SET: inline bit mask. No flag change.
          *
-         * Both go via MOVZ-to-scratch + AND/ORR-register because the
-         * AArch64 logical-immediate encoding can't express many of the
-         * 8-bit masks we need (e.g. 0xFB = ~0x04 has a single zero bit
-         * and isn't a valid bitmask immediate). */
+         * MOVZ-to-scratch + AND/ORR-register because the AArch64 logical-
+         * immediate encoding can't express many of the 8-bit masks we
+         * need (e.g. 0xFB = ~0x04 has a single zero bit and isn't a
+         * valid bitmask immediate). */
         uint8_t mask = (uint8_t)(1u << grp);
         if (family == 2) {
             /* RES n,<src> : val &= ~mask */
@@ -997,6 +1035,14 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
             emit_orr_w32(e, A64_W2, A64_W2, A64_W11);
         }
         if (is_mem) {
+            /* Dual writeback to register BEFORE the SMC store (same
+             * reason as the rot/shift path). For inline RES/SET no helper
+             * has run yet, so W2 is also still valid here — but order
+             * the writes the same way for consistency. */
+            if (dual_wb) {
+                int off = reg8_offset(r);
+                emit_strb_imm(e, A64_W2, A64_W19, (uint32_t)off);
+            }
             emit_mov_w32_w32(e, A64_W9, A64_W2);
             emit_guest_storeb_w9_at_w10_smc(e);
         } else {
