@@ -616,6 +616,13 @@ static inline void emit_csel_w32(emit_t *e, a64_reg_t rd, a64_reg_t rn,
     emit_inst(e, inst);
 }
 
+/* LDR Xt, [Xn, Wm, UXTW] — 8-byte load with the 32-bit offset zero-
+ * extended (no scale). Companion to emit_ldr_w32_reg_uxtw; used by the
+ * block-chain probe to fetch native_code at cache[idx] + 8. */
+static inline void emit_ldr_x64_reg_uxtw(emit_t *e, a64_reg_t rt, a64_reg_t rn, a64_reg_t rm) {
+    emit_ldst_reg_uxtw(e, 3, 1, rt, rn, rm);
+}
+
 /* ---- Shifts (variable + immediate, 32-bit) ---- */
 
 static inline void emit_lslv_w32(emit_t *e, a64_reg_t rd, a64_reg_t rn, a64_reg_t rm) {

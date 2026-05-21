@@ -262,7 +262,17 @@ static void emit_block_prologue(emit_t *e) {
 
 /* Per-block tail: optionally clear cpu->q (when the last emitted op did
  * NOT modify F — helpers set q=1 themselves, so leave their write alone),
- * bump insn_count by delta, restore LR from X22, RET to trampoline. */
+ * bump insn_count by delta, restore LR from X22, then attempt to chain
+ * directly to the next block via an inline cache probe. On a probe miss
+ * (no cached translation for the next PC, or a collision), fall through
+ * to RET so the trampoline can take the slow path.
+ *
+ * Block chaining ABI: chained blocks share the trampoline's stack frame
+ * and the original LR (which lives in X22 across the chain — each block
+ * re-saves X30 → X22 in its prologue, but since the chain entry does a
+ * plain BR, X30 still holds the trampoline-return that block A's tail
+ * restored). RET in the miss path therefore lands back in the trampoline
+ * as if no chaining had happened. */
 static void emit_block_tail(emit_t *e, uint32_t insn_count_delta, int clear_q) {
     if (clear_q) {
         emit_strb_imm(e, A64_WZR, A64_W19, OFF_Q);
@@ -273,6 +283,31 @@ static void emit_block_tail(emit_t *e, uint32_t insn_count_delta, int clear_q) {
     emit_str_x64_imm(e, A64_W9, A64_W19, OFF_INSN_COUNT);
 
     emit_mov_x64_x64(e, A64_W30, A64_W22);
+
+    /* ---- Inline cache probe (block chaining) ----
+     *   W12 = cpu->pc             (0..0xFFFF, zero-ext to W)
+     *   W13 = pc * 16             (cache entry byte offset)
+     *   W15 = cache[idx].guest_pc (32-bit field at +0)
+     *   if W15 != W12 → RET (fall through to trampoline)
+     *   X16 = cache[idx].native_code (8-byte field at +8)
+     *   BR X16
+     *
+     * The cache index is exactly `pc` since BLOCK_CACHE_MASK == 0xFFFF
+     * and pc is uint16_t, so no AND is needed.
+     */
+    emit_ldrh_imm(e, A64_W12, A64_W19, OFF_PC);
+    emit_lsl_w32_imm(e, A64_W13, A64_W12, 4);                /* pc * 16 */
+    emit_ldr_w32_reg_uxtw(e, A64_W15, A64_W21, A64_W13);     /* guest_pc */
+    emit_cmp_w32_w32(e, A64_W15, A64_W12);
+
+    uint32_t patch_miss = emit_pos(e);
+    emit_b_cond(e, A64_COND_NE, 0);
+
+    emit_add_w32_imm(e, A64_W13, A64_W13, 8);                /* offset to native_code */
+    emit_ldr_x64_reg_uxtw(e, A64_W16, A64_W21, A64_W13);
+    emit_br(e, A64_W16);
+
+    emit_patch_cond19(e, patch_miss, emit_pos(e));
     emit_ret(e);
 }
 
