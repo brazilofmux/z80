@@ -32,7 +32,7 @@ CPM_SRCS  = cpm/cpm_bdos.c cpm/cpm_bios.c cpm/cpm_loader.c cpm/cpm_disk.c
 KAYPRO_SRCS = kaypro/kaypro_video.c kaypro/kaypro_kbd.c
 
 # DBT sources
-DBT_COMMON_SRCS = dbt/dbt_common.c dbt/block_cache.c
+DBT_COMMON_SRCS = dbt/dbt_common.c dbt/block_cache.c dbt/dbt_flags.c
 DBT_SRCS = $(DBT_COMMON_SRCS) $(DBT_ARCH_SRC)
 
 # For now the main is a stub that will grow into the monster

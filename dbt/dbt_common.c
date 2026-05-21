@@ -35,6 +35,7 @@ extern int z80_step(z80_cpu_t *cpu);
 int dbt_init(z80_dbt_t *dbt, z80_cpu_t *cpu) {
     memset(dbt, 0, sizeof(*dbt));
     dbt->cpu = cpu;
+    cpu->dbt = dbt;
     dbt_cache_invalidate_all(dbt);
 
     dbt->code_buf = mmap(NULL, CODE_BUF_SIZE,
@@ -53,16 +54,18 @@ int dbt_init(z80_dbt_t *dbt, z80_cpu_t *cpu) {
 }
 
 void dbt_cleanup(z80_dbt_t *dbt) {
+    if (dbt->cpu) dbt->cpu->dbt = NULL;
     if (dbt->code_buf && dbt->code_buf != MAP_FAILED) {
         munmap(dbt->code_buf, CODE_BUF_SIZE);
         dbt->code_buf = NULL;
     }
 }
 
-/* Trampoline signature: called from C with the four register-binding
+/* Trampoline signature: called from C with the register-binding
  * arguments the backend trampoline expects. */
 typedef void (*trampoline_fn_t)(z80_cpu_t *cpu, uint8_t *mem,
-                                void *block, void *cache_base);
+                                void *block, void *cache_base,
+                                void *bitmap_base);
 
 int dbt_run(z80_dbt_t *dbt) {
     z80_cpu_t *cpu = dbt->cpu;
@@ -93,7 +96,7 @@ int dbt_run(z80_dbt_t *dbt) {
 
         if (code) {
             dbt->jit_block_entries++;
-            trampoline(cpu, cpu->mem, code, dbt->cache);
+            trampoline(cpu, cpu->mem, code, dbt->cache, dbt->code_bitmap);
             continue;
         }
 
@@ -120,4 +123,6 @@ void dbt_print_stats(z80_dbt_t *dbt, FILE *out) {
             (unsigned long long)dbt->jit_block_entries);
     fprintf(out, "  interp fallback insns:  %llu\n",
             (unsigned long long)dbt->interp_fallback_insns);
+    fprintf(out, "  SMC invalidations:      %llu\n",
+            (unsigned long long)dbt->smc_invalidations);
 }

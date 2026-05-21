@@ -177,18 +177,23 @@ int main(int argc, char **argv) {
         use_jit = 0;
     }
 
-    z80_dbt_t dbt;
+    /* dbt is ~1 MB (block cache + code-coverage bitmap); heap-allocate so
+     * we don't push main's stack frame into the macOS guard page. */
+    z80_dbt_t *dbt = NULL;
     int used_jit = 0;
     if (use_jit) {
-        if (dbt_init(&dbt, &cpu) != 0) {
+        dbt = malloc(sizeof(*dbt));
+        if (!dbt || dbt_init(dbt, &cpu) != 0) {
             fprintf(stderr, "[dbt] init failed — falling back to interp\n");
+            free(dbt);
+            dbt = NULL;
             use_jit = 0;
         }
     }
 
     if (use_jit) {
         used_jit = 1;
-        int rc = dbt_run(&dbt);
+        int rc = dbt_run(dbt);
         if (rc < 0) {
             fprintf(stderr, "[exit] DBT stopped with error at PC=%04X\n", cpu.pc);
         } else {
@@ -234,12 +239,15 @@ int main(int argc, char **argv) {
         printf("Instructions: %llu\n", (unsigned long long)cpu.insn_count);
         if (used_jit) {
             printf("JIT:\n");
-            dbt_print_stats(&dbt, stdout);
+            dbt_print_stats(dbt, stdout);
         }
     }
 
     /* cleanup */
-    if (used_jit) dbt_cleanup(&dbt);
+    if (used_jit) {
+        dbt_cleanup(dbt);
+        free(dbt);
+    }
     free(cpu.mem);
     return 0;
 }

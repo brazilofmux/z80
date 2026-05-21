@@ -65,6 +65,17 @@ typedef struct {
 
     z80_block_entry_t cache[BLOCK_CACHE_SIZE];
 
+    /* Per-guest-byte tag: nonzero iff some currently-cached block covers
+     * this byte. JIT-emitted stores call into z80_jit_post_store(), which
+     * checks the byte the store landed on; if marked, we invalidate the
+     * whole cache (with bitmap reset) so the next block lookup forces a
+     * re-translation of whatever the patched bytes now decode to.
+     *
+     * Coarse-but-cheap design: a store to a non-code byte costs a single
+     * branch; SMC pays the full cache wipe but is rare. zexdoc's hot
+     * "patch the test op, run it, repeat" loop is exactly this pattern. */
+    uint8_t  code_bitmap[65536];
+
     uint8_t *code_buf;
     uint32_t code_used;
 
@@ -74,6 +85,7 @@ typedef struct {
     uint64_t cache_misses;
     uint64_t interp_fallback_insns;
     uint64_t jit_block_entries;
+    uint64_t smc_invalidations;
 
     int trace;
 } z80_dbt_t;
@@ -87,10 +99,15 @@ void dbt_cleanup(z80_dbt_t *dbt);
 int  dbt_jit_available(void);
 void dbt_print_stats(z80_dbt_t *dbt, FILE *out);
 
-/* Cache management (dbt_common.c) */
+/* Cache management (block_cache.c) */
 z80_block_entry_t *dbt_cache_lookup(z80_dbt_t *dbt, uint16_t pc);
 void               dbt_cache_insert(z80_dbt_t *dbt, uint16_t pc, uint8_t *code);
 void               dbt_cache_invalidate_all(z80_dbt_t *dbt);
+
+/* Mark guest bytes [start, end) as "covered by a cached block" so a
+ * subsequent JIT store to any byte in that range triggers SMC
+ * invalidation. Idempotent. */
+void dbt_mark_block_bytes(z80_dbt_t *dbt, uint16_t start, uint32_t end);
 
 /* ----------------------------------------------------------------------
  * Backend hooks — implemented by dbt_a64.c or dbt_x64.c.

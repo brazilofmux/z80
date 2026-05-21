@@ -35,4 +35,11 @@ void dbt_cache_invalidate_all(z80_dbt_t *dbt) {
         dbt->cache[i].guest_pc    = BLOCK_EMPTY_PC;
         dbt->cache[i].native_code = NULL;
     }
+    memset(dbt->code_bitmap, 0, sizeof(dbt->code_bitmap));
+}
+
+void dbt_mark_block_bytes(z80_dbt_t *dbt, uint16_t start, uint32_t end) {
+    for (uint32_t a = start; a < end; a++) {
+        dbt->code_bitmap[a & 0xFFFF] = 1;
+    }
 }

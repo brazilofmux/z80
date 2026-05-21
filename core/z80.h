@@ -107,6 +107,11 @@ typedef struct z80_cpu {
     /* Pointer to the block cache base (for inline lookup from generated code) */
     void     *block_cache;
 
+    /* Back-pointer to the DBT state. Set by dbt_init when the JIT is in
+     * use; NULL otherwise. JIT helpers (SMC invalidation, ...) reach the
+     * dbt-side state via this. */
+    void     *dbt;
+
     /* Return Address Stack for fast CALL/RET prediction (like the RV32 one) */
     uint16_t ras[32];
     uint8_t  ras_top;
