@@ -1,5 +1,6 @@
 #include "core/z80.h"
 #include "cpm/cpm.h"
+#include "dbt/dbt.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -42,7 +43,8 @@ static void leave_raw_mode(void) {
 static void usage(const char *prog) {
     printf("Usage: %s [options] <program.com>\n\n", prog);
     printf("Options:\n");
-    printf("  -i       Force interpreter (default for now)\n");
+    printf("  -i       Force interpreter (default)\n");
+    printf("  -j       Use the JIT (DBT) — falls back to interp if unavailable\n");
     printf("  -s       Show stats on exit\n");
     printf("  -d       Print BDOS/BIOS/disk startup tracing\n");
     printf("  -T       Trace block ops (periodic register dumps)\n");
@@ -55,6 +57,7 @@ static void usage(const char *prog) {
 
 int main(int argc, char **argv) {
     int show_stats = 0;
+    int use_jit = 0;
     const char *disk_root = NULL;
     const char *prog = NULL;
 
@@ -71,6 +74,10 @@ int main(int argc, char **argv) {
             return 0;
         } else if (strcmp(argv[i], "-s") == 0) {
             show_stats = 1;
+        } else if (strcmp(argv[i], "-i") == 0) {
+            use_jit = 0;
+        } else if (strcmp(argv[i], "-j") == 0) {
+            use_jit = 1;
         } else if (strcmp(argv[i], "-d") == 0) {
             cpm_debug = 1;
         } else if (strcmp(argv[i], "-T") == 0) {
@@ -165,44 +172,74 @@ int main(int argc, char **argv) {
     enter_raw_mode();
     atexit(leave_raw_mode);
 
-    /* Run the interpreter until it hits a terminating condition */
-    for (;;) {
-        /* Direct termination conditions (very common in real .COMs) */
-        if (cpu.pc == 0 && cpu.insn_count > 4) {
-            /* Classic CP/M termination: JP 0, RET to 0 on stack, etc. */
-            fprintf(stderr, "[exit] PC=0000 after %llu insns (RET/JP 0 warmboot)\n",
-                    (unsigned long long)cpu.insn_count);
-            break;
-        }
+    if (use_jit && !dbt_jit_available()) {
+        fprintf(stderr, "[dbt] JIT not available on this host — falling back to interp\n");
+        use_jit = 0;
+    }
 
-        int rc = z80_step(&cpu);
+    z80_dbt_t dbt;
+    int used_jit = 0;
+    if (use_jit) {
+        if (dbt_init(&dbt, &cpu) != 0) {
+            fprintf(stderr, "[dbt] init failed — falling back to interp\n");
+            use_jit = 0;
+        }
+    }
+
+    if (use_jit) {
+        used_jit = 1;
+        int rc = dbt_run(&dbt);
         if (rc < 0) {
-            fprintf(stderr, "CPU stopped with error at PC=%04X\n", cpu.pc);
-            break;
+            fprintf(stderr, "[exit] DBT stopped with error at PC=%04X\n", cpu.pc);
+        } else {
+            fprintf(stderr, "[exit] DBT clean after %llu insns\n",
+                    (unsigned long long)cpu.insn_count);
         }
-        if (rc > 0) {
-            /* Clean CP/M exit via BDOS 0 / WBOOT / BIOS WBOOT */
-            fprintf(stderr, "[exit] BDOS/BIOS warmboot after %llu insns (C=%02X)\n",
-                    (unsigned long long)cpu.insn_count, cpu.c);
-            break;
-        }
-        if (trace_block_ops && (cpu.insn_count & 0x3FFFFFF) == 0 && cpu.insn_count) {
-            fprintf(stderr, "[%llu] PC=%04X SP=%04X HL=%04X DE=%04X BC=%04X AF=%04X IX=%04X IY=%04X\n",
-                    (unsigned long long)cpu.insn_count, cpu.pc, cpu.sp,
-                    cpu.hl, cpu.de, cpu.bc, cpu.af, cpu.ix, cpu.iy);
-        }
-        if (cpu.insn_count > 50000000000ULL) {
-            fprintf(stderr, "Safety limit (50B insns) reached — bug or wait?\n");
-            break;
+    } else {
+        /* Run the interpreter until it hits a terminating condition */
+        for (;;) {
+            /* Direct termination conditions (very common in real .COMs) */
+            if (cpu.pc == 0 && cpu.insn_count > 4) {
+                /* Classic CP/M termination: JP 0, RET to 0 on stack, etc. */
+                fprintf(stderr, "[exit] PC=0000 after %llu insns (RET/JP 0 warmboot)\n",
+                        (unsigned long long)cpu.insn_count);
+                break;
+            }
+
+            int rc = z80_step(&cpu);
+            if (rc < 0) {
+                fprintf(stderr, "CPU stopped with error at PC=%04X\n", cpu.pc);
+                break;
+            }
+            if (rc > 0) {
+                /* Clean CP/M exit via BDOS 0 / WBOOT / BIOS WBOOT */
+                fprintf(stderr, "[exit] BDOS/BIOS warmboot after %llu insns (C=%02X)\n",
+                        (unsigned long long)cpu.insn_count, cpu.c);
+                break;
+            }
+            if (trace_block_ops && (cpu.insn_count & 0x3FFFFFF) == 0 && cpu.insn_count) {
+                fprintf(stderr, "[%llu] PC=%04X SP=%04X HL=%04X DE=%04X BC=%04X AF=%04X IX=%04X IY=%04X\n",
+                        (unsigned long long)cpu.insn_count, cpu.pc, cpu.sp,
+                        cpu.hl, cpu.de, cpu.bc, cpu.af, cpu.ix, cpu.iy);
+            }
+            if (cpu.insn_count > 50000000000ULL) {
+                fprintf(stderr, "Safety limit (50B insns) reached — bug or wait?\n");
+                break;
+            }
         }
     }
 
     if (show_stats) {
         printf("\n--- stats ---\n");
         printf("Instructions: %llu\n", (unsigned long long)cpu.insn_count);
+        if (used_jit) {
+            printf("JIT:\n");
+            dbt_print_stats(&dbt, stdout);
+        }
     }
 
     /* cleanup */
+    if (used_jit) dbt_cleanup(&dbt);
     free(cpu.mem);
     return 0;
 }
