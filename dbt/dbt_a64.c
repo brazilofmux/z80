@@ -84,12 +84,13 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
 #define OFF_HL         offsetof(z80_cpu_t, hl)
 #define OFF_SP         offsetof(z80_cpu_t, sp)
 #define OFF_PC         offsetof(z80_cpu_t, pc)
+#define OFF_Q          offsetof(z80_cpu_t, q)
 #define OFF_INSN_COUNT offsetof(z80_cpu_t, insn_count)
 
 /* Map a Z80 reg code 0..7 (B,C,D,E,H,L,(HL),A) to its byte offset
- * within z80_cpu_t. (HL) and the half-index regs (IXH/IXL/IYH/IYL,
- * codes 8/9) are not handled here — they need memory or prefix logic
- * the first cut deliberately skips. Returns -1 on unsupported. */
+ * within z80_cpu_t. Code 6 is (HL), handled by the memory-op cases
+ * via X20 + HL. Codes 8/9 (IXH/IXL/IYH/IYL with DD/FD prefix) are not
+ * handled here — first cut skips them. Returns -1 on unsupported. */
 static int reg8_offset(int r) {
     switch (r) {
     case 0: return OFF_B;
@@ -115,25 +116,42 @@ static int rr_offset(int rr) {
     }
 }
 
-/* Emit "W9 = imm16" using MOVZ (one instruction, since imm16 fits). */
-static void emit_load_imm16(emit_t *e, uint16_t imm) {
-    emit_movz_w32(e, A64_W9, imm, 0);
+/* ---- Tiny emit helpers used by the per-op cases. W9 is the canonical
+ *      scratch for values, W10 for addresses. ---- */
+
+static inline void emit_load_imm16_into(emit_t *e, a64_reg_t rd, uint16_t imm) {
+    emit_movz_w32(e, rd, imm, 0);
 }
 
-/* Emit the common block epilogue: write final PC + bump insn_count by n,
- * then RET back into the trampoline. */
-static void emit_block_epilogue(emit_t *e, uint16_t final_pc, uint32_t insn_count_delta) {
-    /* cpu->pc = final_pc */
-    emit_movz_w32(e, A64_W9, final_pc, 0);
-    emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+/* W9 = mem[W10] — guest byte load via the X20 mem base. */
+static inline void emit_guest_loadb_w9_at_w10(emit_t *e) {
+    emit_ldrb_reg_uxtw(e, A64_W9, A64_W20, A64_W10);
+}
 
-    /* cpu->insn_count += insn_count_delta */
+/* mem[W10] = W9 — guest byte store via X20. */
+static inline void emit_guest_storeb_w9_at_w10(emit_t *e) {
+    emit_strb_reg_uxtw(e, A64_W9, A64_W20, A64_W10);
+}
+
+/* Emit the per-block tail: clear cpu->q (no step-1 op modifies F, so
+ * the next interp step's prev_q must be 0), bump insn_count by delta,
+ * and RET into the trampoline. pc-write is the caller's job. */
+static void emit_block_tail(emit_t *e, uint32_t insn_count_delta) {
+    emit_strb_imm(e, A64_WZR, A64_W19, OFF_Q);
+
     emit_ldr_x64_imm(e, A64_W9, A64_W19, OFF_INSN_COUNT);
-    /* ADD X9, X9, #imm12  — delta fits in 12 bits as long as MAX_BLOCK_INSNS does. */
     emit_add_x64_imm(e, A64_W9, A64_W9, insn_count_delta);
     emit_str_x64_imm(e, A64_W9, A64_W19, OFF_INSN_COUNT);
 
     emit_ret(e);
+}
+
+/* Convenience: write cpu->pc = final_pc, then emit tail. Used by blocks
+ * that fall through (no branch op already wrote pc). */
+static void emit_block_epilogue(emit_t *e, uint16_t final_pc, uint32_t insn_count_delta) {
+    emit_movz_w32(e, A64_W9, final_pc, 0);
+    emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+    emit_block_tail(e, insn_count_delta);
 }
 
 /* A "trap target" is any PC the interpreter knows how to dispatch as a
@@ -157,12 +175,38 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     switch (dec->type) {
     case Z80_OP_NOP:
         return 1;
+
     case Z80_OP_LD_R_N:
         return reg8_offset(dec->reg1) >= 0;
+
     case Z80_OP_LD_R_R:
+        /* (HL) on either side is the unprefixed indirect form; we handle
+         * it as a memory op below. (HL)/(HL) is HALT (filtered by the
+         * decoder), so we never see both = 6. */
+        if (dec->reg1 == 6) return reg8_offset(dec->reg2) >= 0;
+        if (dec->reg2 == 6) return reg8_offset(dec->reg1) >= 0;
         return reg8_offset(dec->reg1) >= 0 && reg8_offset(dec->reg2) >= 0;
+
     case Z80_OP_LD_RR_NN:
         return rr_offset(dec->reg1) >= 0;
+
+    case Z80_OP_LD_HL_N:
+    case Z80_OP_LD_A_BC:
+    case Z80_OP_LD_A_DE:
+    case Z80_OP_LD_BC_A:
+    case Z80_OP_LD_DE_A:
+    case Z80_OP_LD_A_NN:
+    case Z80_OP_LD_NN_A:
+    case Z80_OP_LD_HL_indNN:
+    case Z80_OP_LD_NN_HL:
+    case Z80_OP_EX_DE_HL:
+    case Z80_OP_LD_SP_HL:
+        return 1;
+
+    case Z80_OP_INC_RR:
+    case Z80_OP_DEC_RR:
+        return rr_offset(dec->reg1) >= 0;
+
     case Z80_OP_JP_NN:
         return !is_trap_target(dec->imm16);
     case Z80_OP_JR_E: {
@@ -189,6 +233,22 @@ static int emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
     }
 
     case Z80_OP_LD_R_R: {
+        if (dec->reg1 == 6) {
+            /* LD (HL), r : mem[HL] = reg2 */
+            int off_src = reg8_offset(dec->reg2);
+            emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
+            emit_ldrb_imm(e, A64_W9,  A64_W19, (uint32_t)off_src);
+            emit_guest_storeb_w9_at_w10(e);
+            return 0;
+        }
+        if (dec->reg2 == 6) {
+            /* LD r, (HL) : reg1 = mem[HL] */
+            int off_dst = reg8_offset(dec->reg1);
+            emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
+            emit_guest_loadb_w9_at_w10(e);
+            emit_strb_imm(e, A64_W9, A64_W19, (uint32_t)off_dst);
+            return 0;
+        }
         int off_dst = reg8_offset(dec->reg1);
         int off_src = reg8_offset(dec->reg2);
         if (off_dst == off_src) return 0;   /* LD A,A and friends — no-op */
@@ -199,8 +259,109 @@ static int emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
 
     case Z80_OP_LD_RR_NN: {
         int off = rr_offset(dec->reg1);
-        emit_load_imm16(e, dec->imm16);
+        emit_load_imm16_into(e, A64_W9, dec->imm16);
         emit_strh_imm(e, A64_W9, A64_W19, (uint32_t)off);
+        return 0;
+    }
+
+    case Z80_OP_LD_HL_N: {
+        /* mem[HL] = imm8 */
+        emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
+        emit_movz_w32(e, A64_W9, dec->imm8, 0);
+        emit_guest_storeb_w9_at_w10(e);
+        return 0;
+    }
+
+    case Z80_OP_LD_A_BC: {
+        emit_ldrh_imm(e, A64_W10, A64_W19, OFF_BC);
+        emit_guest_loadb_w9_at_w10(e);
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_A);
+        return 0;
+    }
+    case Z80_OP_LD_A_DE: {
+        emit_ldrh_imm(e, A64_W10, A64_W19, OFF_DE);
+        emit_guest_loadb_w9_at_w10(e);
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_A);
+        return 0;
+    }
+    case Z80_OP_LD_BC_A: {
+        emit_ldrh_imm(e, A64_W10, A64_W19, OFF_BC);
+        emit_ldrb_imm(e, A64_W9,  A64_W19, OFF_A);
+        emit_guest_storeb_w9_at_w10(e);
+        return 0;
+    }
+    case Z80_OP_LD_DE_A: {
+        emit_ldrh_imm(e, A64_W10, A64_W19, OFF_DE);
+        emit_ldrb_imm(e, A64_W9,  A64_W19, OFF_A);
+        emit_guest_storeb_w9_at_w10(e);
+        return 0;
+    }
+
+    case Z80_OP_LD_A_NN: {
+        emit_load_imm16_into(e, A64_W10, dec->imm16);
+        emit_guest_loadb_w9_at_w10(e);
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_A);
+        return 0;
+    }
+    case Z80_OP_LD_NN_A: {
+        emit_load_imm16_into(e, A64_W10, dec->imm16);
+        emit_ldrb_imm(e, A64_W9, A64_W19, OFF_A);
+        emit_guest_storeb_w9_at_w10(e);
+        return 0;
+    }
+
+    case Z80_OP_LD_HL_indNN: {
+        /* HL.lo = mem[nn] ; HL.hi = mem[(nn+1) & 0xFFFF] — byte-by-byte
+         * because nn+1 must wrap at 0x10000 and the host buffer is only
+         * 64K, so a 16-bit halfword load at nn=0xFFFF would walk off. */
+        uint16_t nn  = dec->imm16;
+        uint16_t nn1 = (uint16_t)(nn + 1);
+        emit_load_imm16_into(e, A64_W10, nn);
+        emit_guest_loadb_w9_at_w10(e);
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_L);
+        emit_load_imm16_into(e, A64_W10, nn1);
+        emit_guest_loadb_w9_at_w10(e);
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_H);
+        return 0;
+    }
+    case Z80_OP_LD_NN_HL: {
+        uint16_t nn  = dec->imm16;
+        uint16_t nn1 = (uint16_t)(nn + 1);
+        emit_load_imm16_into(e, A64_W10, nn);
+        emit_ldrb_imm(e, A64_W9, A64_W19, OFF_L);
+        emit_guest_storeb_w9_at_w10(e);
+        emit_load_imm16_into(e, A64_W10, nn1);
+        emit_ldrb_imm(e, A64_W9, A64_W19, OFF_H);
+        emit_guest_storeb_w9_at_w10(e);
+        return 0;
+    }
+
+    case Z80_OP_INC_RR: {
+        int off = rr_offset(dec->reg1);
+        emit_ldrh_imm(e, A64_W9, A64_W19, (uint32_t)off);
+        emit_add_w32_imm(e, A64_W9, A64_W9, 1);
+        emit_strh_imm(e, A64_W9, A64_W19, (uint32_t)off);
+        return 0;
+    }
+    case Z80_OP_DEC_RR: {
+        int off = rr_offset(dec->reg1);
+        emit_ldrh_imm(e, A64_W9, A64_W19, (uint32_t)off);
+        emit_sub_w32_imm(e, A64_W9, A64_W9, 1);
+        emit_strh_imm(e, A64_W9, A64_W19, (uint32_t)off);
+        return 0;
+    }
+
+    case Z80_OP_EX_DE_HL: {
+        emit_ldrh_imm(e, A64_W9,  A64_W19, OFF_DE);
+        emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
+        emit_strh_imm(e, A64_W10, A64_W19, OFF_DE);
+        emit_strh_imm(e, A64_W9,  A64_W19, OFF_HL);
+        return 0;
+    }
+
+    case Z80_OP_LD_SP_HL: {
+        emit_ldrh_imm(e, A64_W9, A64_W19, OFF_HL);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_SP);
         return 0;
     }
 
@@ -277,11 +438,7 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     /* If we ended on a branch, the op already wrote cpu->pc. Otherwise
      * the next PC is the straight-through fall-through value in `pc`. */
     if (ended_by_branch) {
-        /* Only bump insn_count + RET; PC is already in place. */
-        emit_ldr_x64_imm(&e, A64_W9, A64_W19, OFF_INSN_COUNT);
-        emit_add_x64_imm(&e, A64_W9, A64_W9, insns);
-        emit_str_x64_imm(&e, A64_W9, A64_W19, OFF_INSN_COUNT);
-        emit_ret(&e);
+        emit_block_tail(&e, insns);
     } else {
         emit_block_epilogue(&e, pc, insns);
     }
