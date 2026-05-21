@@ -604,6 +604,18 @@ static inline void emit_tst_w32(emit_t *e, a64_reg_t rn, a64_reg_t rm) {
     emit_inst(e, inst);
 }
 
+/* CSEL Wd, Wn, Wm, cond — 32-bit conditional select. cond uses the
+ * standard a64_cond_t encoding. If `cond` holds, Wd = Wn; else Wd = Wm. */
+static inline void emit_csel_w32(emit_t *e, a64_reg_t rd, a64_reg_t rn,
+                                  a64_reg_t rm, a64_cond_t cond) {
+    uint32_t inst = 0x1A800000u
+                  | ((uint32_t)(rm & 0x1F) << 16)
+                  | (((uint32_t)cond & 0xF) << 12)
+                  | ((uint32_t)(rn & 0x1F) << 5)
+                  | (rd & 0x1F);
+    emit_inst(e, inst);
+}
+
 /* ---- Shifts (variable + immediate, 32-bit) ---- */
 
 static inline void emit_lslv_w32(emit_t *e, a64_reg_t rd, a64_reg_t rn, a64_reg_t rm) {

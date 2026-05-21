@@ -227,6 +227,30 @@ static void emit_set_memptr_rr_plus_one(emit_t *e, uint32_t off_rr) {
     emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
 }
 
+/* Map a Z80 condition code (cc, 0..7) to (flag mask, host condition).
+ * Layout: cc = (flag_select << 1) | sense, where sense=0 is "take if
+ * flag clear" (host EQ after TST) and sense=1 is "take if flag set"
+ * (host NE). */
+static uint8_t flag_mask_for_cc(int cc) {
+    static const uint8_t masks[4] = {
+        Z80_FLAG_Z, Z80_FLAG_C, Z80_FLAG_PV, Z80_FLAG_S
+    };
+    return masks[(cc >> 1) & 3];
+}
+static a64_cond_t host_cond_for_cc(int cc) {
+    /* Even cc: take-if-clear  → EQ. Odd cc: take-if-set → NE. */
+    return (cc & 1) ? A64_COND_NE : A64_COND_EQ;
+}
+
+/* Emit "TST F, #mask" via a scratch register, sets host flags so the
+ * caller can immediately follow with CSEL Wd, Wtaken, Wfall, host_cond.
+ * Uses W12 as the mask scratch. */
+static void emit_test_z80_flag(emit_t *e, uint8_t mask) {
+    emit_ldrb_imm(e, A64_W10, A64_W19, OFF_F);
+    emit_movz_w32(e, A64_W12, mask, 0);
+    emit_tst_w32(e, A64_W10, A64_W12);
+}
+
 /* Per-block prologue. The trampoline BLRs in with X30 (LR) pointing at
  * the trampoline's resume site. Any BLR we make inside the block (e.g.
  * to a flag helper) would clobber X30, so we stash it in X22 — which is
@@ -366,9 +390,25 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
         uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
         return !is_jp_trap_target(target);
     }
+    case Z80_OP_JP_CC_NN:
+        /* JP cc: only one branch (the conditional one) could trap. The
+         * fall-through pc_after is straight-line code we can always
+         * resolve via the cache, so we only need to refuse when the
+         * conditional target is a trap. */
+        return !is_jp_trap_target(dec->imm16);
+    case Z80_OP_JR_CC_E: {
+        uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
+        return !is_jp_trap_target(target);
+    }
     case Z80_OP_CALL_NN:
         return !is_call_trap_target(dec->imm16);
+    case Z80_OP_CALL_CC_NN:
+        return !is_call_trap_target(dec->imm16);
     case Z80_OP_RET:
+        return 1;
+    case Z80_OP_RET_CC:
+        return 1;
+    case Z80_OP_DJNZ:
         return 1;
     default:
         return 0;
@@ -722,6 +762,148 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         /* sp += 2, masked */
         emit_add_mask16(e, A64_W11, A64_W11, 2);
         emit_strh_imm(e, A64_W11, A64_W19, OFF_SP);
+        return OP_ENDS_BLOCK;
+    }
+
+    case Z80_OP_JP_CC_NN: {
+        /* JP cc, nn:
+         *   memptr = nn          (always — interp sets it regardless)
+         *   pc = (cc) ? nn : pc_after
+         * No memory side effects, so CSEL handles both branches cleanly. */
+        uint16_t target = dec->imm16;
+        emit_test_z80_flag(e, flag_mask_for_cc(dec->cc));
+        emit_movz_w32(e, A64_W9,  target,   0);     /* W9 = target */
+        emit_movz_w32(e, A64_W11, pc_after, 0);     /* W11 = fall-through */
+        emit_csel_w32(e, A64_W13, A64_W9, A64_W11, host_cond_for_cc(dec->cc));
+        emit_strh_imm(e, A64_W13, A64_W19, OFF_PC);
+        emit_strh_imm(e, A64_W9,  A64_W19, OFF_MEMPTR);
+        return OP_ENDS_BLOCK;
+    }
+
+    case Z80_OP_JR_CC_E: {
+        /* JR cc, e:
+         *   if (cc) { pc = target ; memptr = target } else { pc = pc_after }
+         * memptr is conditional; CSEL it against the existing memptr. */
+        uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
+        emit_test_z80_flag(e, flag_mask_for_cc(dec->cc));
+        emit_movz_w32(e, A64_W9,  target,   0);
+        emit_movz_w32(e, A64_W11, pc_after, 0);
+        a64_cond_t hc = host_cond_for_cc(dec->cc);
+        emit_csel_w32(e, A64_W13, A64_W9, A64_W11, hc);
+        emit_strh_imm(e, A64_W13, A64_W19, OFF_PC);
+        /* memptr: only updated on the taken path. */
+        emit_ldrh_imm(e, A64_W14, A64_W19, OFF_MEMPTR);
+        emit_csel_w32(e, A64_W14, A64_W9, A64_W14, hc);
+        emit_strh_imm(e, A64_W14, A64_W19, OFF_MEMPTR);
+        return OP_ENDS_BLOCK;
+    }
+
+    case Z80_OP_DJNZ: {
+        /* DJNZ e:
+         *   B = (B - 1) & 0xFF
+         *   if (B != 0) { pc = target ; memptr = target }
+         *   else        { pc = pc_after }   (memptr unchanged) */
+        uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
+
+        emit_ldrb_imm(e, A64_W9, A64_W19, OFF_B);
+        emit_sub_w32_imm(e, A64_W9, A64_W9, 1);
+        (void)emit_and_w32_imm(e, A64_W9, A64_W9, 0xFF);
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_B);
+
+        /* CMP W9, #0 — host Z = (W9 == 0). Use NE for "taken when B != 0". */
+        emit_cmp_w32_imm(e, A64_W9, 0);
+        emit_movz_w32(e, A64_W10, target,   0);
+        emit_movz_w32(e, A64_W11, pc_after, 0);
+        emit_csel_w32(e, A64_W13, A64_W10, A64_W11, A64_COND_NE);
+        emit_strh_imm(e, A64_W13, A64_W19, OFF_PC);
+
+        /* memptr: only on taken path. */
+        emit_ldrh_imm(e, A64_W14, A64_W19, OFF_MEMPTR);
+        emit_csel_w32(e, A64_W14, A64_W10, A64_W14, A64_COND_NE);
+        emit_strh_imm(e, A64_W14, A64_W19, OFF_MEMPTR);
+        return OP_ENDS_BLOCK;
+    }
+
+    case Z80_OP_CALL_CC_NN: {
+        /* CALL cc, nn:
+         *   memptr = nn (always)
+         *   if (cc) { sp -= 2 ; mem[sp..sp+1] = pc_after ; pc = nn }
+         *   else    { pc = pc_after }
+         *
+         * Forward-branch over the taken path because the push is
+         * irreducibly conditional — we can't CSEL a memory write. */
+        uint16_t target = dec->imm16;
+        emit_movz_w32(e, A64_W9, target, 0);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);       /* memptr = target */
+
+        emit_test_z80_flag(e, flag_mask_for_cc(dec->cc));
+        /* B.cond skip_to_not_taken — fires when cc is FALSE. EQ when cc
+         * is odd (take-if-set, so not-taken is flag-clear → host EQ
+         * after TST means flag-clear → not taken). Mirror for even. */
+        a64_cond_t skip_cond = (dec->cc & 1) ? A64_COND_EQ : A64_COND_NE;
+        uint32_t patch_skip = emit_pos(e);
+        emit_b_cond(e, skip_cond, 0);
+
+        /* Taken path: push pc_after, set pc = target. */
+        emit_ldrh_imm(e, A64_W11, A64_W19, OFF_SP);
+        emit_sub_mask16(e, A64_W11, A64_W11, 2);
+        emit_strh_imm(e, A64_W11, A64_W19, OFF_SP);
+        emit_movz_w32(e, A64_W9, pc_after & 0xFF, 0);
+        emit_strb_reg_uxtw(e, A64_W9, A64_W20, A64_W11);
+        emit_add_mask16(e, A64_W12, A64_W11, 1);
+        emit_movz_w32(e, A64_W9, (pc_after >> 8) & 0xFF, 0);
+        emit_strb_reg_uxtw(e, A64_W9, A64_W20, A64_W12);
+        emit_movz_w32(e, A64_W9, target, 0);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+
+        /* Skip past the not-taken path. */
+        uint32_t patch_done = emit_pos(e);
+        emit_b_cond(e, A64_COND_AL, 0);
+
+        /* Not-taken path: pc = pc_after. */
+        emit_patch_cond19(e, patch_skip, emit_pos(e));
+        emit_movz_w32(e, A64_W9, pc_after, 0);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+
+        /* Land here. */
+        emit_patch_cond19(e, patch_done, emit_pos(e));
+        return OP_ENDS_BLOCK;
+    }
+
+    case Z80_OP_RET_CC: {
+        /* RET cc:
+         *   if (cc) { pc.lo = mem[sp] ; pc.hi = mem[(sp+1)&0xFFFF] ;
+         *              sp += 2 ; memptr = pc }
+         *   else    { pc = pc_after }
+         *
+         * Forward-branch like CALL cc since the load+sp update is
+         * irreducibly conditional. */
+        emit_test_z80_flag(e, flag_mask_for_cc(dec->cc));
+        a64_cond_t skip_cond = (dec->cc & 1) ? A64_COND_EQ : A64_COND_NE;
+        uint32_t patch_skip = emit_pos(e);
+        emit_b_cond(e, skip_cond, 0);
+
+        /* Taken path: pop pc, sp += 2, memptr = pc. */
+        emit_ldrh_imm(e, A64_W11, A64_W19, OFF_SP);
+        emit_ldrb_reg_uxtw(e, A64_W9, A64_W20, A64_W11);
+        emit_add_mask16(e, A64_W12, A64_W11, 1);
+        emit_ldrb_reg_uxtw(e, A64_W10, A64_W20, A64_W12);
+        emit_lsl_w32_imm(e, A64_W10, A64_W10, 8);
+        emit_orr_w32(e, A64_W9, A64_W9, A64_W10);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
+        emit_add_mask16(e, A64_W11, A64_W11, 2);
+        emit_strh_imm(e, A64_W11, A64_W19, OFF_SP);
+
+        uint32_t patch_done = emit_pos(e);
+        emit_b_cond(e, A64_COND_AL, 0);
+
+        /* Not-taken path: pc = pc_after. */
+        emit_patch_cond19(e, patch_skip, emit_pos(e));
+        emit_movz_w32(e, A64_W9, pc_after, 0);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
+
+        emit_patch_cond19(e, patch_done, emit_pos(e));
         return OP_ENDS_BLOCK;
     }
 
