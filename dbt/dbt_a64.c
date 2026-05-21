@@ -80,6 +80,7 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
  * with offsetof at codegen time so the layout stays soft. */
 #define OFF_F          offsetof(z80_cpu_t, f)
 #define OFF_A          offsetof(z80_cpu_t, a)
+#define OFF_AF         offsetof(z80_cpu_t, af)   /* PUSH/POP AF as a halfword */
 #define OFF_C          offsetof(z80_cpu_t, c)
 #define OFF_B          offsetof(z80_cpu_t, b)
 #define OFF_E          offsetof(z80_cpu_t, e)
@@ -537,6 +538,18 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_LDIR:
     case Z80_OP_LDDR:
         return 1;
+
+    /* PUSH/POP rr. reg1 encoding:
+     *   0/1/2  → BC/DE/HL (rr_offset)
+     *   3      → AF (special)
+     *   4      → IX or IY per DD/FD prefix (idx_reg_offset)
+     * Flags untouched (the F byte is just data for PUSH AF / POP AF). */
+    case Z80_OP_PUSH_RR:
+    case Z80_OP_POP_RR:
+        if (dec->reg1 <= 2) return 1;
+        if (dec->reg1 == 3) return !idx;     /* PUSH AF has no DD/FD form */
+        if (dec->reg1 == 4) return idx;
+        return 0;
     default:
         return 0;
     }
@@ -1002,6 +1015,49 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
                            : (void *)(uintptr_t)z80_jit_lddr;
         emit_call_helper(e, helper);
         return OP_MODIFIES_F;
+    }
+
+    /* ---- PUSH rr / POP rr.
+     * SP-relative stack accesses don't go through the SMC store helper:
+     * the guest stack and the code segment essentially never overlap on
+     * CP/M, and the interp-side SMC tracker (z80_mem_w) still catches
+     * any pathological case via interp fallback for an immediate retry.
+     * Same justification as the CALL push path. */
+    case Z80_OP_PUSH_RR: {
+        uint32_t off_rr;
+        if      (dec->reg1 <= 2) off_rr = (uint32_t)rr_offset(dec->reg1);
+        else if (dec->reg1 == 3) off_rr = OFF_AF;
+        else                     off_rr = (uint32_t)idx_reg_offset(dec->prefix);
+
+        emit_ldrh_imm(e, A64_W11, A64_W19, OFF_SP);
+        emit_sub_mask16(e, A64_W11, A64_W11, 2);
+        emit_strh_imm(e, A64_W11, A64_W19, OFF_SP);
+
+        emit_ldrh_imm(e, A64_W9, A64_W19, off_rr);
+        emit_strb_reg_uxtw(e, A64_W9, A64_W20, A64_W11);    /* mem[sp] = lo(rr) */
+        emit_add_mask16(e, A64_W12, A64_W11, 1);
+        emit_lsr_w32_imm(e, A64_W10, A64_W9, 8);
+        emit_strb_reg_uxtw(e, A64_W10, A64_W20, A64_W12);   /* mem[sp+1] = hi(rr) */
+        return OP_FALL_THROUGH;
+    }
+
+    case Z80_OP_POP_RR: {
+        uint32_t off_rr;
+        if      (dec->reg1 <= 2) off_rr = (uint32_t)rr_offset(dec->reg1);
+        else if (dec->reg1 == 3) off_rr = OFF_AF;
+        else                     off_rr = (uint32_t)idx_reg_offset(dec->prefix);
+
+        emit_ldrh_imm(e, A64_W11, A64_W19, OFF_SP);
+        emit_ldrb_reg_uxtw(e, A64_W9, A64_W20, A64_W11);    /* W9 = mem[sp] */
+        emit_add_mask16(e, A64_W12, A64_W11, 1);
+        emit_ldrb_reg_uxtw(e, A64_W10, A64_W20, A64_W12);   /* W10 = mem[sp+1] */
+        emit_lsl_w32_imm(e, A64_W10, A64_W10, 8);
+        emit_orr_w32(e, A64_W9, A64_W9, A64_W10);           /* W9 = hi:lo */
+        emit_strh_imm(e, A64_W9, A64_W19, off_rr);
+
+        emit_add_mask16(e, A64_W11, A64_W11, 2);
+        emit_strh_imm(e, A64_W11, A64_W19, OFF_SP);
+        return OP_FALL_THROUGH;
     }
 
     case Z80_OP_JP_NN: {
