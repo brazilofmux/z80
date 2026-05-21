@@ -19,7 +19,17 @@
 #include <stdbool.h>
 
 /* 8-bit register access helpers (the classic 0-7 encoding) */
-static inline uint8_t *reg8_ptr(z80_cpu_t *cpu, int r) {
+/* Register code map:
+ *   0..5,7 = B,C,D,E,H,L,A (standard 8-bit registers)
+ *   6      = (HL) / (IX+d) / (IY+d), handled by callers using effective_addr
+ *   8      = IXH or IYH (high byte of the prefix-selected index register)
+ *   9      = IXL or IYL
+ *
+ * Codes 8/9 are only ever emitted by the decoder when a DD/FD prefix is
+ * active and the instruction is a pure register form (no memory operand).
+ * The decoder picks IXH vs IYH based on the prefix — the helpers below
+ * resolve which byte to access via dec->prefix. */
+static inline uint8_t *reg8_ptr_p(z80_cpu_t *cpu, int r, uint8_t prefix) {
     switch (r) {
     case 0: return &cpu->b;
     case 1: return &cpu->c;
@@ -28,8 +38,20 @@ static inline uint8_t *reg8_ptr(z80_cpu_t *cpu, int r) {
     case 4: return &cpu->h;
     case 5: return &cpu->l;
     case 7: return &cpu->a;
-    default: return NULL; /* (HL) / (IX+d) / (IY+d) handled specially */
+    case 8: {
+        uint16_t *p = (prefix == 0xFD) ? &cpu->iy : &cpu->ix;
+        return ((uint8_t *)p) + 1;   /* high byte */
     }
+    case 9: {
+        uint16_t *p = (prefix == 0xFD) ? &cpu->iy : &cpu->ix;
+        return (uint8_t *)p;         /* low byte */
+    }
+    default: return NULL;
+    }
+}
+
+static inline uint8_t *reg8_ptr(z80_cpu_t *cpu, int r) {
+    return reg8_ptr_p(cpu, r, 0);
 }
 
 /* Return the effective address for a memory operand, taking DD/FD prefix into account */
@@ -44,7 +66,7 @@ static inline uint8_t read_reg8(z80_cpu_t *cpu, int r, const z80_decoded *dec) {
         uint16_t addr = effective_addr(cpu, dec, cpu->hl);
         return cpu->mem[addr & 0xFFFF];
     }
-    uint8_t *p = reg8_ptr(cpu, r);
+    uint8_t *p = reg8_ptr_p(cpu, r, dec->prefix);
     return p ? *p : 0;
 }
 
@@ -54,7 +76,7 @@ static inline void write_reg8(z80_cpu_t *cpu, int r, uint8_t val, const z80_deco
         cpu->mem[addr & 0xFFFF] = val;
         return;
     }
-    uint8_t *p = reg8_ptr(cpu, r);
+    uint8_t *p = reg8_ptr_p(cpu, r, dec->prefix);
     if (p) *p = val;
 }
 
@@ -96,7 +118,9 @@ static inline void set_flags_sub(z80_cpu_t *cpu, uint8_t a, uint8_t b, uint8_t r
     if (res & 0x80) f |= Z80_FLAG_S;
     if ((a & 0xF) < (b & 0xF)) f |= Z80_FLAG_H;
     if (a < b) f |= Z80_FLAG_C;
-    if (((a ^ b) & 0x80) && ((res ^ a) & 0x80) == 0) f |= Z80_FLAG_PV;
+    /* Signed overflow for A-B: A,B have different signs AND result has
+     * the sign of B (equivalently, sign differs from A). */
+    if (((a ^ b) & 0x80) && ((res ^ a) & 0x80)) f |= Z80_FLAG_PV;
     cpu->f = f;
 }
 
@@ -145,6 +169,10 @@ int z80_step(z80_cpu_t *cpu) {
     case Z80_OP_LD_RR_NN:
         if (dec.reg1 == 3) { /* SP */
             cpu->sp = dec.imm16;
+        } else if (dec.reg1 == 2 && dec.prefix == 0xDD) {
+            cpu->ix = dec.imm16;
+        } else if (dec.reg1 == 2 && dec.prefix == 0xFD) {
+            cpu->iy = dec.imm16;
         } else {
             write_rr(cpu, dec.reg1, dec.imm16);
         }
@@ -288,11 +316,15 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_INC_RR:
         if (dec.reg1 == 3) cpu->sp++;
+        else if (dec.reg1 == 2 && dec.prefix == 0xDD) cpu->ix++;
+        else if (dec.reg1 == 2 && dec.prefix == 0xFD) cpu->iy++;
         else write_rr(cpu, dec.reg1, read_rr(cpu, dec.reg1) + 1);
         break;
 
     case Z80_OP_DEC_RR:
         if (dec.reg1 == 3) cpu->sp--;
+        else if (dec.reg1 == 2 && dec.prefix == 0xDD) cpu->ix--;
+        else if (dec.reg1 == 2 && dec.prefix == 0xFD) cpu->iy--;
         else write_rr(cpu, dec.reg1, read_rr(cpu, dec.reg1) - 1);
         break;
 
@@ -766,30 +798,20 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_LDIR:
-        /* Extremely common in CP/M for screen and disk buffers */
+    case Z80_OP_LDDR:
+        /* Extremely common in CP/M for screen and disk buffers. We run the
+         * whole block copy atomically; BC always reaches 0 when we return.
+         * Flags at exit: PV=0, H=0, N=0; S/Z/C preserved. */
         {
+            int incr = (dec.type == Z80_OP_LDIR) ? 1 : -1;
             while (cpu->bc != 0) {
                 cpu->mem[cpu->de & 0xFFFF] = cpu->mem[cpu->hl & 0xFFFF];
-                cpu->hl++; cpu->de++; cpu->bc--;
-                /* LDIR sets flags in a weird way on real silicon, but most code ignores them */
+                cpu->hl = (cpu->hl + incr) & 0xFFFF;
+                cpu->de = (cpu->de + incr) & 0xFFFF;
+                cpu->bc = (cpu->bc - 1) & 0xFFFF;
             }
-            /* On Z80, LDIR leaves PC pointing at the ED B0 instruction until BC==0,
-               then continues after it. We already advanced PC, so we are correct
-               for the "BC became zero" case. For the looping case we need to
-               back up PC. */
-            if (cpu->bc != 0) {
-                cpu->pc = old_pc;   /* repeat the instruction */
-            }
+            cpu->f &= ~(Z80_FLAG_PV | Z80_FLAG_H | Z80_FLAG_N);
         }
-        break;
-
-    case Z80_OP_LDDR:
-        /* similar, decrementing */
-        while (cpu->bc != 0) {
-            cpu->mem[cpu->de & 0xFFFF] = cpu->mem[cpu->hl & 0xFFFF];
-            cpu->hl--; cpu->de--; cpu->bc--;
-        }
-        if (cpu->bc != 0) cpu->pc = old_pc;
         break;
 
     /* --------------------------------------------------------------------
@@ -797,15 +819,24 @@ int z80_step(z80_cpu_t *cpu) {
      * ------------------------------------------------------------------ */
     case Z80_OP_ADD_HL_RR:
         {
-            uint16_t src = (dec.reg1 == 3) ? cpu->sp : read_rr(cpu, dec.reg1);
-            uint32_t res = (uint32_t)cpu->hl + src;
-            /* Z80 16-bit ADD flags: H from bit 11 carry, C from bit 15, N=0, S/Z/PV not officially defined but many emulators copy from high byte */
-            uint8_t f = cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV); /* keep some */
+            /* With DD/FD prefix this is ADD IX,rr or ADD IY,rr — the "HL"
+             * position is replaced, and reg1==RR_HL means the same index
+             * register (ADD IX,IX / ADD IY,IY), not HL. */
+            uint16_t *dst = (dec.prefix == 0xDD) ? &cpu->ix
+                          : (dec.prefix == 0xFD) ? &cpu->iy
+                          : &cpu->hl;
+            uint16_t src;
+            if (dec.reg1 == 3) src = cpu->sp;
+            else if (dec.reg1 == 2) src = *dst;       /* "HL" position == dst register */
+            else src = read_rr(cpu, dec.reg1);
+
+            uint32_t res = (uint32_t)*dst + src;
+            uint8_t f = cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV);
             if (res & 0x10000) f |= Z80_FLAG_C;
-            if (((cpu->hl & 0x0FFF) + (src & 0x0FFF)) & 0x1000) f |= Z80_FLAG_H;
+            if (((*dst & 0x0FFF) + (src & 0x0FFF)) & 0x1000) f |= Z80_FLAG_H;
             f &= ~Z80_FLAG_N;
             cpu->f = f;
-            cpu->hl = (uint16_t)res;
+            *dst = (uint16_t)res;
         }
         break;
 
@@ -868,13 +899,23 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_LD_NN_HL:
-        cpu->mem[dec.imm16 & 0xFFFF]       = cpu->l;
-        cpu->mem[(dec.imm16 + 1) & 0xFFFF] = cpu->h;
+        {
+            uint16_t v = (dec.prefix == 0xDD) ? cpu->ix
+                       : (dec.prefix == 0xFD) ? cpu->iy
+                       : cpu->hl;
+            cpu->mem[dec.imm16 & 0xFFFF]       = v & 0xFF;
+            cpu->mem[(dec.imm16 + 1) & 0xFFFF] = v >> 8;
+        }
         break;
 
     case Z80_OP_LD_HL_indNN:
-        cpu->l = cpu->mem[dec.imm16 & 0xFFFF];
-        cpu->h = cpu->mem[(dec.imm16 + 1) & 0xFFFF];
+        {
+            uint16_t v = cpu->mem[dec.imm16 & 0xFFFF]
+                      | (cpu->mem[(dec.imm16 + 1) & 0xFFFF] << 8);
+            if (dec.prefix == 0xDD) cpu->ix = v;
+            else if (dec.prefix == 0xFD) cpu->iy = v;
+            else cpu->hl = v;
+        }
         break;
 
     case Z80_OP_CPL:
@@ -944,6 +985,35 @@ int z80_step(z80_cpu_t *cpu) {
         cpu->f &= ~Z80_FLAG_N;
         break;
 
+    case Z80_OP_CPI:
+    case Z80_OP_CPD:
+    case Z80_OP_CPIR:
+    case Z80_OP_CPDR:
+        {
+            /* CPI/CPD/CPIR/CPDR all do: cmp A,(HL); HL +/-= 1; BC--.
+             *   Flags: S, Z from cmp result. H per low-nibble borrow.
+             *   PV = (BC after decrement != 0)
+             *   N = 1
+             *   C unchanged. */
+            uint8_t v = cpu->mem[cpu->hl & 0xFFFF];
+            uint8_t res = cpu->a - v;
+            uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N;
+            if (res == 0) f |= Z80_FLAG_Z;
+            if (res & 0x80) f |= Z80_FLAG_S;
+            if ((cpu->a & 0xF) < (v & 0xF)) f |= Z80_FLAG_H;
+            int incr = (dec.type == Z80_OP_CPI || dec.type == Z80_OP_CPIR) ? 1 : -1;
+            cpu->hl = (cpu->hl + incr) & 0xFFFF;
+            cpu->bc = (cpu->bc - 1) & 0xFFFF;
+            if (cpu->bc != 0) f |= Z80_FLAG_PV;
+            cpu->f = f;
+            /* Repeating forms: stay on the instruction until BC==0 or match. */
+            if ((dec.type == Z80_OP_CPIR || dec.type == Z80_OP_CPDR)
+                && cpu->bc != 0 && res != 0) {
+                cpu->pc = old_pc;
+            }
+        }
+        break;
+
     /* --------------------------------------------------------------------
      * CB prefix group — rotates, shifts, BIT, RES, SET
      * This is one of the most frequently used groups in real CP/M code.
@@ -957,14 +1027,21 @@ int z80_step(z80_cpu_t *cpu) {
         bool is_res = (sub >= 0x80 && sub < 0xC0);
         bool is_set = (sub >= 0xC0);
 
-        uint8_t val;
-        bool mem = (r == 6);
+        /* DD/FD CB d xx — operand is always (IX+d) or (IY+d), regardless
+         * of the register encoding in the sub-opcode. The reg field still
+         * selects an undocumented write-back target for non-BIT ops, which
+         * we don't model yet. */
+        bool indexed = (dec.prefix == 0xDD || dec.prefix == 0xFD);
+        bool mem = indexed || (r == 6);
         uint16_t addr = 0;
+        uint8_t val;
 
         if (mem) {
-            /* For now plain (HL). DD/FD CB d xx will be improved when we
-             * add proper indexed addressing support. */
-            addr = cpu->hl;
+            if (indexed) {
+                addr = (dec.prefix == 0xDD ? cpu->ix : cpu->iy) + (int16_t)dec.disp;
+            } else {
+                addr = cpu->hl;
+            }
             val = cpu->mem[addr & 0xFFFF];
         } else {
             uint8_t *p = reg8_ptr(cpu, r);
@@ -979,12 +1056,20 @@ int z80_step(z80_cpu_t *cpu) {
         if (is_bit) {
             int bit = (sub >> 3) & 7;
             bool b = (val & (1u << bit)) != 0;
-            new_f &= ~(Z80_FLAG_Z | Z80_FLAG_H | Z80_FLAG_N | Z80_FLAG_PV);
-            if (!b) new_f |= Z80_FLAG_Z;
+            /* Z80 BIT n,r flag rules:
+             *   C: unchanged
+             *   N: 0
+             *   H: 1
+             *   Z = !b ;  PV = Z
+             *   S = b only when n == 7 (else 0)
+             *   X (bit 3) and Y (bit 5) come from the operand byte for the
+             *   register form. (The (HL) and (IX+d) forms take XY from
+             *   MEMPTR / address high byte, which zexdoc doesn't check.) */
+            new_f &= Z80_FLAG_C;
+            if (!b) new_f |= Z80_FLAG_Z | Z80_FLAG_PV;
             new_f |= Z80_FLAG_H;
-            if (!b) new_f |= Z80_FLAG_PV;
-            /* Undocumented 3/5 from the source byte */
-            new_f = (new_f & 0xC7) | (val & 0x28);
+            if (b && bit == 7) new_f |= Z80_FLAG_S;
+            new_f |= (val & 0x28);
             result = val;
         } else if (is_res) {
             int bit = (sub >> 3) & 7;
@@ -1034,12 +1119,14 @@ int z80_step(z80_cpu_t *cpu) {
             new_f &= ~Z80_FLAG_N;
         }
 
-        /* Write back */
-        if (mem) {
-            cpu->mem[addr & 0xFFFF] = result;
-        } else {
-            uint8_t *p = reg8_ptr(cpu, r);
-            if (p) *p = result;
+        /* Write back (BIT doesn't write anything) */
+        if (!is_bit) {
+            if (mem) {
+                cpu->mem[addr & 0xFFFF] = result;
+            } else {
+                uint8_t *p = reg8_ptr(cpu, r);
+                if (p) *p = result;
+            }
         }
 
         /* Common flag updates for non-BIT ops */

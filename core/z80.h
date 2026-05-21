@@ -239,6 +239,12 @@ typedef enum {
     /* ED 43/53/63/73 — LD (nn),rr  ;  ED 4B/5B/6B/7B — LD rr,(nn) */
     Z80_OP_LD_NN_RR,
     Z80_OP_LD_RR_NN_IND,
+
+    /* ED-prefix block compare ops */
+    Z80_OP_CPI,
+    Z80_OP_CPD,
+    Z80_OP_CPIR,
+    Z80_OP_CPDR,
 } z80_op_type;
 
 typedef struct {

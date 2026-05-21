@@ -56,19 +56,23 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
         op = mem[pc & 0xFFFF];
     }
 
-    /* Handle CB (possibly DD CB d xx or FD CB d xx) */
+    /* Handle CB (possibly DD CB d xx or FD CB d xx).
+     *
+     * Convention: pc points at the op byte (here, CB). bytes already
+     * accounts for everything up to and including the op. Subsequent
+     * bytes are at mem[pc+1], mem[pc+2], ... */
     if (op == 0xCB) {
         out->prefix = prefix ? prefix : 0xCB;
-
         if (prefix) {
-            /* DD CB d op or FD CB d op */
-            out->disp = (int8_t)mem[pc & 0xFFFF];
-            pc++; out->bytes++;
+            /* DD CB d sub  /  FD CB d sub */
+            out->disp = (int8_t)mem[(pc + 1) & 0xFFFF];
+            out->imm8 = mem[(pc + 2) & 0xFFFF];
+            out->bytes += 2;
+        } else {
+            /* CB sub */
+            out->imm8 = mem[(pc + 1) & 0xFFFF];
+            out->bytes++;
         }
-
-        out->imm8 = mem[pc & 0xFFFF];   /* the CB sub-opcode */
-        pc++; out->bytes++;
-
         out->type = Z80_OP_CB;
         out->opcode = out->imm8;
         return out->bytes;
@@ -109,9 +113,13 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
             return out->bytes;
         case 0x44: out->type = Z80_OP_NEG;  return out->bytes;
         case 0xA0: out->type = Z80_OP_LDI;  return out->bytes;
+        case 0xA1: out->type = Z80_OP_CPI;  return out->bytes;
         case 0xA8: out->type = Z80_OP_LDD;  return out->bytes;
+        case 0xA9: out->type = Z80_OP_CPD;  return out->bytes;
         case 0xB0: out->type = Z80_OP_LDIR; return out->bytes;
+        case 0xB1: out->type = Z80_OP_CPIR; return out->bytes;
         case 0xB8: out->type = Z80_OP_LDDR; return out->bytes;
+        case 0xB9: out->type = Z80_OP_CPDR; return out->bytes;
         default:
             out->type = Z80_OP_UNKNOWN;
             return out->bytes;
@@ -150,8 +158,10 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
     }
 
     if (needs_disp) {
-        out->disp = (int8_t)mem[pc & 0xFFFF];
-        pc++;
+        /* pc currently points at the op byte under the DD/FD prefix; the
+         * displacement is the byte right after it. */
+        out->disp = (int8_t)mem[(pc + 1) & 0xFFFF];
+        pc += 2;
         out->bytes++;
     }
 
@@ -502,6 +512,35 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
 
     /* ED prefix is now fully handled at the top of this function and returns
      * before reaching here, so no late-pass override is needed. */
+
+    /* DD/FD half-register remap: under DD/FD prefix, H (4) and L (5) refer
+     * to IXH/IXL or IYH/IYL — but only for pure register forms (the memory
+     * forms have already short-circuited above with their own op types).
+     * The interpreter resolves codes 8/9 to IXH/IXL or IYH/IYL based on
+     * out->prefix at execution time. */
+    if (prefix == 0xDD || prefix == 0xFD) {
+        switch (out->type) {
+        case Z80_OP_LD_R_R:
+        case Z80_OP_LD_R_N:
+        case Z80_OP_INC_R:
+        case Z80_OP_DEC_R:
+        case Z80_OP_ADD_A_R:
+        case Z80_OP_ADC_A_R:
+        case Z80_OP_SUB_A_R:
+        case Z80_OP_SBC_A_R:
+        case Z80_OP_AND_A_R:
+        case Z80_OP_OR_A_R:
+        case Z80_OP_XOR_A_R:
+        case Z80_OP_CP_A_R:
+            if (out->reg1 == 4) out->reg1 = 8;
+            else if (out->reg1 == 5) out->reg1 = 9;
+            if (out->reg2 == 4) out->reg2 = 8;
+            else if (out->reg2 == 5) out->reg2 = 9;
+            break;
+        default:
+            break;
+        }
+    }
 
     /* Legacy placeholder cleanup — safe to ignore for now */
     if (prefix == 0xCB && out->type == 0) {
