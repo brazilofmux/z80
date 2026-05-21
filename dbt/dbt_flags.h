@@ -47,6 +47,19 @@ uint8_t z80_jit_srl(z80_cpu_t *cpu, uint8_t val);
  * passes as val (register form) or memptr.high (HL form). */
 void z80_jit_bit(z80_cpu_t *cpu, uint8_t val, uint8_t bit_n, uint8_t xy_byte);
 
+/* LDIR / LDDR — host-memmove intrinsics. Runs the entire block copy in
+ * one go (matches the interp, which also bumps insn_count by 1 per
+ * LDIR/LDDR regardless of BC). SMC is handled by a single batched
+ * invalidation pass after the copy: if any destination byte was in the
+ * code bitmap, the cache slots whose start could cover that byte are
+ * cleared. BC==0 is a no-op (matches interp); the real Z80 would copy
+ * 64K, but our interp doesn't and we keep parity with -V.
+ *
+ * Flags on completion: S/Z/C preserved, H=N=PV=0, XY = bits 3/1 of
+ * (A + last_byte_transferred). */
+void z80_jit_ldir(z80_cpu_t *cpu);
+void z80_jit_lddr(z80_cpu_t *cpu);
+
 /* Self-modifying-code detector. Called after every JIT-emitted guest
  * store. Checks dbt->code_bitmap[addr]: if the byte lay inside a
  * currently-cached translated block, blow away the entire cache so the

@@ -397,12 +397,12 @@ static int is_call_trap_target(uint16_t pc) {
 /* Return 1 if this op type, in this prefix/register configuration, is
  * something the first-cut translator can emit. */
 static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
-    /* ED is a separate ISA — not yet translated. CB-prefix is accepted
-     * on the Z80_OP_CB case below; DD CB / FD CB (which decode with
+    /* ED is a separate ISA — accepted only on the per-op cases that
+     * opt in (LDIR/LDDR as host intrinsics). CB-prefix is accepted on
+     * the Z80_OP_CB case below; DD CB / FD CB (which decode with
      * prefix==DD or FD AND type==Z80_OP_CB) we still skip — the dual
      * register+memory writeback for the indexed form needs its own
      * codegen pass. */
-    if (dec->prefix == 0xED) return 0;
     int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
 
     switch (dec->type) {
@@ -531,6 +531,12 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_CB:
         /* Plain CB-prefix only — DD CB / FD CB is held back. */
         return dec->prefix == 0xCB;
+
+    /* ED-prefix block-copy intrinsics. The interp also runs these
+     * atomically, so insn_count parity is preserved. */
+    case Z80_OP_LDIR:
+    case Z80_OP_LDDR:
+        return 1;
     default:
         return 0;
     }
@@ -985,6 +991,17 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
             emit_strb_imm(e, A64_W2, A64_W19, (uint32_t)off);
         }
         return OP_FALL_THROUGH;
+    }
+
+    case Z80_OP_LDIR:
+    case Z80_OP_LDDR: {
+        /* Helper does the entire block copy, updates HL/DE/BC/F, and
+         * performs the SMC sweep. Helper bumps cpu->q itself. */
+        void *helper = (dec->type == Z80_OP_LDIR)
+                           ? (void *)(uintptr_t)z80_jit_ldir
+                           : (void *)(uintptr_t)z80_jit_lddr;
+        emit_call_helper(e, helper);
+        return OP_MODIFIES_F;
     }
 
     case Z80_OP_JP_NN: {

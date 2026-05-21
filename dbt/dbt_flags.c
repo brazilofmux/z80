@@ -245,6 +245,85 @@ void z80_jit_bit(z80_cpu_t *cpu, uint8_t val, uint8_t bit_n, uint8_t xy_byte) {
     cpu->q = 1;
 }
 
+/* ---- LDIR / LDDR — host-memmove intrinsics.
+ *
+ * The interp does the same loop atomically (one Z80_step call covers
+ * the whole transfer regardless of BC) and bumps insn_count by 1, so
+ * we match that exactly. The block copy itself is byte-at-a-time
+ * because LDIR's documented overlap semantics (DE = HL + 1) deliberately
+ * propagate the source byte through the destination range — a plain
+ * memmove would preserve the original bytes and break that idiom.
+ *
+ * SMC: a single bitmap scan over the destination range catches the
+ * case where the copy lands on code we've translated. If any byte was
+ * code, we do one window-sized cache sweep instead of paying the
+ * per-byte SMC helper.
+ *
+ * BC=0: the interp's `while (bc != 0)` skips the body entirely.
+ * Documented Z80 behaviour is "copy 65536 bytes" but we match interp
+ * so -V stays clean. */
+static void ldir_lddr_common(z80_cpu_t *cpu, int incr) {
+    uint16_t bc = cpu->bc;
+    uint16_t hl = cpu->hl;
+    uint16_t de = cpu->de;
+    uint8_t  last_byte = 0;
+
+    if (bc != 0) {
+        uint32_t count = bc;
+        for (uint32_t i = 0; i < count; i++) {
+            uint16_t s = (uint16_t)(hl + (uint16_t)(incr * (int32_t)i));
+            uint16_t d = (uint16_t)(de + (uint16_t)(incr * (int32_t)i));
+            last_byte = cpu->mem[s];
+            cpu->mem[d] = last_byte;
+        }
+    }
+
+    /* Register updates: HL, DE move by (incr * bc); BC ends at 0. */
+    cpu->hl = (uint16_t)(hl + (uint16_t)(incr * (int32_t)bc));
+    cpu->de = (uint16_t)(de + (uint16_t)(incr * (int32_t)bc));
+    cpu->bc = 0;
+
+    /* Flags */
+    uint8_t n = (uint8_t)(cpu->a + last_byte);
+    uint8_t f = cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_C);
+    f |= (n & Z80_FLAG_3);              /* X = bit 3 of n */
+    if (n & 0x02) f |= Z80_FLAG_5;      /* Y = bit 1 of n */
+    cpu->f = f;
+    cpu->q = 1;
+
+    /* SMC: did we overwrite any byte that lives in a cached block? */
+    if (bc == 0 || !cpu->dbt) return;
+    z80_dbt_t *dbt = (z80_dbt_t *)cpu->dbt;
+
+    /* Walk the destination range looking for any bitmap hit. */
+    int any_code = 0;
+    {
+        int32_t step = incr;
+        uint32_t count = bc;
+        for (uint32_t i = 0; i < count; i++) {
+            uint16_t d = (uint16_t)(de + (uint16_t)(step * (int32_t)i));
+            if (dbt->code_bitmap[d]) { any_code = 1; break; }
+        }
+    }
+    if (!any_code) return;
+
+    /* One sweep over the affected range plus the max-block window: any
+     * cache slot whose start address is in [dst_lo - window + 1, dst_hi]
+     * could cover a byte we just rewrote. */
+    uint32_t window = dbt->max_block_bytes;
+    uint16_t dst_lo = (incr > 0) ? de : (uint16_t)(de - (bc - 1));
+    uint32_t total = (uint32_t)bc + window;
+    for (uint32_t k = 0; k < total; k++) {
+        uint16_t p = (uint16_t)(dst_lo + k - window + 1);
+        dbt->cache[p & BLOCK_CACHE_MASK].guest_pc    = BLOCK_EMPTY_PC;
+        dbt->cache[p & BLOCK_CACHE_MASK].native_code = NULL;
+    }
+    dbt->smc_invalidations++;
+}
+
+void z80_jit_ldir(z80_cpu_t *cpu) { ldir_lddr_common(cpu, +1); }
+void z80_jit_lddr(z80_cpu_t *cpu) { ldir_lddr_common(cpu, -1); }
+
 /* Called from JIT-emitted store sequences after a guest byte store. The
  * inline LDRB+CBZ around the call already short-circuits the no-SMC
  * case, so by the time we get here we know we have a real hit and the
