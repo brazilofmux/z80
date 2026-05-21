@@ -245,6 +245,10 @@ typedef enum {
     Z80_OP_CPD,
     Z80_OP_CPIR,
     Z80_OP_CPDR,
+
+    /* ED 67/6F: rotate-decimal between A's low nibble and (HL) */
+    Z80_OP_RRD,
+    Z80_OP_RLD,
 } z80_op_type;
 
 typedef struct {

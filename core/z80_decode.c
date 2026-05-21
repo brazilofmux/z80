@@ -112,6 +112,8 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
             out->bytes += 2;
             return out->bytes;
         case 0x44: out->type = Z80_OP_NEG;  return out->bytes;
+        case 0x67: out->type = Z80_OP_RRD;  return out->bytes;
+        case 0x6F: out->type = Z80_OP_RLD;  return out->bytes;
         case 0xA0: out->type = Z80_OP_LDI;  return out->bytes;
         case 0xA1: out->type = Z80_OP_CPI;  return out->bytes;
         case 0xA8: out->type = Z80_OP_LDD;  return out->bytes;

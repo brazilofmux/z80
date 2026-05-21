@@ -195,6 +195,7 @@ int z80_step(z80_cpu_t *cpu) {
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
             if ((v & 0xF) == 0) f |= Z80_FLAG_H;
+            if (v == 0x80) f |= Z80_FLAG_PV;
             cpu->f = f;
         }
         break;
@@ -208,6 +209,7 @@ int z80_step(z80_cpu_t *cpu) {
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
             if ((v & 0xF) == 0xF) f |= Z80_FLAG_H;
+            if (v == 0x7F) f |= Z80_FLAG_PV;
             cpu->f = f;
         }
         break;
@@ -928,31 +930,46 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_CCF:
-        cpu->f ^= Z80_FLAG_C;
-        cpu->f &= ~Z80_FLAG_N;
-        /* H is set to old C in real Z80 — we approximate */
-        if (cpu->f & Z80_FLAG_C) cpu->f |= Z80_FLAG_H; else cpu->f &= ~Z80_FLAG_H;
+        {
+            /* H = old C ; C = !old C ; N = 0. Other docs unchanged. */
+            uint8_t old_c = cpu->f & Z80_FLAG_C;
+            cpu->f &= ~(Z80_FLAG_H | Z80_FLAG_N | Z80_FLAG_C);
+            if (old_c) cpu->f |= Z80_FLAG_H;
+            else       cpu->f |= Z80_FLAG_C;
+        }
         break;
 
     case Z80_OP_DAA:
-        /* Proper DAA is fiddly. For now a reasonable approximation that works
-         * for the common BCD cases in CP/M tools. Real implementation needs
-         * the full 100+ entry correction table or careful bit logic. */
         {
             uint8_t a = cpu->a;
+            uint8_t fcin = cpu->f & Z80_FLAG_C;
+            uint8_t fhin = cpu->f & Z80_FLAG_H;
+            uint8_t fnin = cpu->f & Z80_FLAG_N;
             uint8_t corr = 0;
-            if ((a & 0x0F) > 9 || (cpu->f & Z80_FLAG_H)) corr |= 0x06;
-            if (a > 0x99 || (cpu->f & Z80_FLAG_C))     corr |= 0x60;
-            if (a > 0x99) cpu->f |= Z80_FLAG_C;
-            a += (cpu->f & Z80_FLAG_N) ? -corr : corr;
-            cpu->a = a;
-            /* update Z/S/PV (H is cleared or set per rules) */
-            if (a == 0) cpu->f |= Z80_FLAG_Z; else cpu->f &= ~Z80_FLAG_Z;
-            if (a & 0x80) cpu->f |= Z80_FLAG_S; else cpu->f &= ~Z80_FLAG_S;
-            /* P/V = parity of result */
-            int p = 0; for (int i = 0; i < 8; i++) p ^= (a >> i) & 1;
-            if (p == 0) cpu->f |= Z80_FLAG_PV; else cpu->f &= ~Z80_FLAG_PV;
-            cpu->f &= ~Z80_FLAG_H; /* simplified */
+            uint8_t new_c = 0;
+
+            if ((a & 0x0F) > 9 || fhin) corr |= 0x06;
+            if (a > 0x99 || fcin)       { corr |= 0x60; new_c = Z80_FLAG_C; }
+
+            uint8_t new_a;
+            uint8_t new_h;
+            if (fnin) {
+                /* Subtract correction. H reflects whether bit-4 borrow
+                 * occurred during the conceptual subtraction. */
+                new_a = a - corr;
+                new_h = (fhin && (a & 0x0F) < 6) ? Z80_FLAG_H : 0;
+            } else {
+                new_a = a + corr;
+                new_h = ((a & 0x0F) > 9) ? Z80_FLAG_H : 0;
+            }
+
+            cpu->a = new_a;
+            uint8_t f = fnin | new_c | new_h;
+            if (new_a == 0) f |= Z80_FLAG_Z;
+            if (new_a & 0x80) f |= Z80_FLAG_S;
+            int p = 0; for (int i = 0; i < 8; i++) p ^= (new_a >> i) & 1;
+            if (p == 0) f |= Z80_FLAG_PV;
+            cpu->f = f;
         }
         break;
 
@@ -983,6 +1000,36 @@ int z80_step(z80_cpu_t *cpu) {
         if (cpu->bc != 0) cpu->f |= Z80_FLAG_PV; else cpu->f &= ~Z80_FLAG_PV;
         cpu->f &= ~Z80_FLAG_H;
         cpu->f &= ~Z80_FLAG_N;
+        break;
+
+    case Z80_OP_RRD:
+    case Z80_OP_RLD:
+        {
+            /* RRD: A_low <- (HL)_low ; (HL)_low <- (HL)_high ; (HL)_high <- A_low
+             * RLD: A_low <- (HL)_high ; (HL)_high <- (HL)_low ; (HL)_low <- A_low
+             * Flags: S, Z, P/V (parity) from new A; H=0, N=0, C unchanged. */
+            uint8_t m = cpu->mem[cpu->hl & 0xFFFF];
+            uint8_t a_lo = cpu->a & 0x0F;
+            uint8_t a_hi = cpu->a & 0xF0;
+            uint8_t m_lo = m & 0x0F;
+            uint8_t m_hi = (m & 0xF0) >> 4;
+            uint8_t new_a, new_m;
+            if (dec.type == Z80_OP_RRD) {
+                new_a = a_hi | m_lo;
+                new_m = (a_lo << 4) | m_hi;
+            } else {
+                new_a = a_hi | m_hi;
+                new_m = (m_lo << 4) | a_lo;
+            }
+            cpu->a = new_a;
+            cpu->mem[cpu->hl & 0xFFFF] = new_m;
+            uint8_t f = cpu->f & Z80_FLAG_C;
+            if (new_a == 0) f |= Z80_FLAG_Z;
+            if (new_a & 0x80) f |= Z80_FLAG_S;
+            int p = 0; for (int i = 0; i < 8; i++) p ^= (new_a >> i) & 1;
+            if (p == 0) f |= Z80_FLAG_PV;
+            cpu->f = f;
+        }
         break;
 
     case Z80_OP_CPI:
@@ -1119,28 +1166,35 @@ int z80_step(z80_cpu_t *cpu) {
             new_f &= ~Z80_FLAG_N;
         }
 
-        /* Write back (BIT doesn't write anything) */
+        /* Write back (BIT writes nothing).
+         * For the undocumented DD/FD CB d <sub> form, RES/SET/rotate
+         * write the result to BOTH the memory operand AND register r
+         * (when r != 6). zexdoc's <set,res> n,(<ix,iy>+1) test relies
+         * on this side effect being visible in the registers. */
         if (!is_bit) {
             if (mem) {
                 cpu->mem[addr & 0xFFFF] = result;
+                if (indexed && r != 6) {
+                    uint8_t *p = reg8_ptr(cpu, r);
+                    if (p) *p = result;
+                }
             } else {
                 uint8_t *p = reg8_ptr(cpu, r);
                 if (p) *p = result;
             }
         }
 
-        /* Common flag updates for non-BIT ops */
-        if (!is_bit) {
+        /* Flag updates for rotate/shift only. RES and SET do not modify
+         * any flag on real Z80. */
+        if (!is_bit && !is_res && !is_set) {
             if (result == 0) new_f |= Z80_FLAG_Z; else new_f &= ~Z80_FLAG_Z;
             if (result & 0x80) new_f |= Z80_FLAG_S; else new_f &= ~Z80_FLAG_S;
-
-            /* P/V = parity for most rotate/shift/RES/SET results */
             int parity = 0;
             for (int i = 0; i < 8; i++) parity ^= (result >> i) & 1;
             if (parity == 0) new_f |= Z80_FLAG_PV; else new_f &= ~Z80_FLAG_PV;
         }
 
-        cpu->f = new_f;
+        if (!is_res && !is_set) cpu->f = new_f;
         break;
     }
 
