@@ -135,7 +135,18 @@ int dbt_run(z80_dbt_t *dbt) {
     z80_cpu_t *cpu = dbt->cpu;
     trampoline_fn_t trampoline = (trampoline_fn_t)(void *)dbt->code_buf;
 
-    /* Lazily initialise the parallel shadow on first -V entry. */
+    /* Lazily initialise the parallel shadow on first -V entry.
+     *
+     * NOTE on -V and interactive programs: the shadow cpu's interp
+     * shares stdin/stdout with the real cpu — both execute BDOS dispatch
+     * and both call cpm_conin(), so each keystroke is consumed twice.
+     * That's fine for the OUTPUT (you just see characters duplicated)
+     * but breaks lockstep for INPUT: real and shadow read different
+     * bytes from the same stream and their cpu state diverges. zex* and
+     * any other output-only workloads work; Zork and other interactive
+     * programs will report spurious lockstep divergences whose AF bytes
+     * are the ASCII codes of consecutive keystrokes (e.g. real=0x71 'q'
+     * vs shadow=0x75 'u' from a piped "quit"). */
     if (dbt->verify && !dbt->shadow_mem) {
         dbt->shadow_mem = calloc(1, 65536);
         if (!dbt->shadow_mem) {
