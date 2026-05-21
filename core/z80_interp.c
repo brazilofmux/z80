@@ -100,9 +100,18 @@ static inline void write_rr(z80_cpu_t *cpu, int rr, uint16_t val) {
     }
 }
 
+/* XY = bits 5 and 3 of `b`, packed into F's positions. */
+static inline uint8_t xy_from(uint8_t b) { return b & (Z80_FLAG_5 | Z80_FLAG_3); }
+
+/* Parity-even = 1 (P/V flag set), parity-odd = 0. */
+static inline uint8_t parity8(uint8_t v) {
+    v ^= v >> 4; v ^= v >> 2; v ^= v >> 1;
+    return (v & 1) ? 0 : Z80_FLAG_PV;
+}
+
 /* Flag helpers — simple eager version for the interpreter */
 static inline void set_flags_add(z80_cpu_t *cpu, uint8_t a, uint8_t b, uint8_t res) {
-    uint8_t f = 0;
+    uint8_t f = xy_from(res);
     if (res == 0) f |= Z80_FLAG_Z;
     if (res & 0x80) f |= Z80_FLAG_S;
     if (((a & 0xF) + (b & 0xF)) > 0xF) f |= Z80_FLAG_H;
@@ -110,10 +119,11 @@ static inline void set_flags_add(z80_cpu_t *cpu, uint8_t a, uint8_t b, uint8_t r
     /* P/V for addition is overflow */
     if (((a ^ b) & 0x80) == 0 && ((res ^ a) & 0x80)) f |= Z80_FLAG_PV;
     cpu->f = f;
+    cpu->q = 1;
 }
 
 static inline void set_flags_sub(z80_cpu_t *cpu, uint8_t a, uint8_t b, uint8_t res) {
-    uint8_t f = Z80_FLAG_N;
+    uint8_t f = Z80_FLAG_N | xy_from(res);
     if (res == 0) f |= Z80_FLAG_Z;
     if (res & 0x80) f |= Z80_FLAG_S;
     if ((a & 0xF) < (b & 0xF)) f |= Z80_FLAG_H;
@@ -122,15 +132,29 @@ static inline void set_flags_sub(z80_cpu_t *cpu, uint8_t a, uint8_t b, uint8_t r
      * the sign of B (equivalently, sign differs from A). */
     if (((a ^ b) & 0x80) && ((res ^ a) & 0x80)) f |= Z80_FLAG_PV;
     cpu->f = f;
+    cpu->q = 1;
+}
+
+/* CP A,b — same as SUB but XY come from the OPERAND, not the result.
+ * (One of the documented Z80 quirks; zexall checks this.) */
+static inline void set_flags_cp(z80_cpu_t *cpu, uint8_t a, uint8_t b, uint8_t res) {
+    uint8_t f = Z80_FLAG_N | xy_from(b);
+    if (res == 0) f |= Z80_FLAG_Z;
+    if (res & 0x80) f |= Z80_FLAG_S;
+    if ((a & 0xF) < (b & 0xF)) f |= Z80_FLAG_H;
+    if (a < b) f |= Z80_FLAG_C;
+    if (((a ^ b) & 0x80) && ((res ^ a) & 0x80)) f |= Z80_FLAG_PV;
+    cpu->f = f;
+    cpu->q = 1;
 }
 
 static inline void set_flags_logic(z80_cpu_t *cpu, uint8_t res) {
-    uint8_t f = 0;
+    uint8_t f = xy_from(res);
     if (res == 0) f |= Z80_FLAG_Z;
     if (res & 0x80) f |= Z80_FLAG_S;
-    /* P/V = parity for logic ops */
-    int p = 0; for (int i=0;i<8;i++) p ^= (res >> i) & 1; if (p==0) f |= Z80_FLAG_PV;
+    f |= parity8(res);
     cpu->f = f;
+    cpu->q = 1;
 }
 
 /* Condition code test */
@@ -162,6 +186,13 @@ int z80_step(z80_cpu_t *cpu) {
     uint16_t old_pc = cpu->pc;
     cpu->pc = (cpu->pc + dec.bytes) & 0xFFFF;   /* default: advance */
 
+    /* Save Q from the previous instruction (was-F-modified?) for the
+     * SCF/CCF XY quirk. Default this instruction to Q=0; any case that
+     * writes F must set cpu->q = 1. */
+    uint8_t prev_q = cpu->q;
+    cpu->q = 0;
+    (void)prev_q;   /* used only by SCF/CCF */
+
     switch (dec.type) {
     case Z80_OP_NOP:
         break;
@@ -191,12 +222,13 @@ int z80_step(z80_cpu_t *cpu) {
             uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] + 1;
             cpu->mem[a] = v;
-            uint8_t f = cpu->f & Z80_FLAG_C;
+            uint8_t f = (cpu->f & Z80_FLAG_C) | xy_from(v);
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
             if ((v & 0xF) == 0) f |= Z80_FLAG_H;
             if (v == 0x80) f |= Z80_FLAG_PV;
             cpu->f = f;
+            cpu->q = 1;
         }
         break;
 
@@ -205,29 +237,35 @@ int z80_step(z80_cpu_t *cpu) {
             uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] - 1;
             cpu->mem[a] = v;
-            uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N;
+            uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N | xy_from(v);
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
             if ((v & 0xF) == 0xF) f |= Z80_FLAG_H;
             if (v == 0x7F) f |= Z80_FLAG_PV;
             cpu->f = f;
+            cpu->q = 1;
         }
         break;
 
     case Z80_OP_LD_NN_A:
         cpu->mem[dec.imm16 & 0xFFFF] = cpu->a;
+        /* MEMPTR.low = (nn+1) & 0xFF, MEMPTR.high = A */
+        cpu->memptr = ((dec.imm16 + 1) & 0xFF) | ((uint16_t)cpu->a << 8);
         break;
 
     case Z80_OP_LD_A_NN:
         cpu->a = cpu->mem[dec.imm16 & 0xFFFF];
+        cpu->memptr = (uint16_t)(dec.imm16 + 1);
         break;
 
     case Z80_OP_LD_A_BC:
         cpu->a = cpu->mem[cpu->bc & 0xFFFF];
+        cpu->memptr = (uint16_t)(cpu->bc + 1);
         break;
 
     case Z80_OP_LD_A_DE:
         cpu->a = cpu->mem[cpu->de & 0xFFFF];
+        cpu->memptr = (uint16_t)(cpu->de + 1);
         break;
 
     /* IX/IY indexed memory forms (use the prefix/disp-aware helpers) */
@@ -256,10 +294,12 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_LD_DE_A:
         cpu->mem[cpu->de & 0xFFFF] = cpu->a;
+        cpu->memptr = ((cpu->de + 1) & 0xFF) | ((uint16_t)cpu->a << 8);
         break;
 
     case Z80_OP_LD_BC_A:
         cpu->mem[cpu->bc & 0xFFFF] = cpu->a;
+        cpu->memptr = ((cpu->bc + 1) & 0xFF) | ((uint16_t)cpu->a << 8);
         break;
 
     case Z80_OP_INC_R:
@@ -267,51 +307,53 @@ int z80_step(z80_cpu_t *cpu) {
             uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] + 1;
             cpu->mem[a] = v;
-            /* set flags for INC */
-            uint8_t f = cpu->f & (Z80_FLAG_C);
+            uint8_t f = (cpu->f & Z80_FLAG_C) | xy_from(v);
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
             if ((v & 0xF) == 0) f |= Z80_FLAG_H;
             if (v == 0x80) f |= Z80_FLAG_PV;
             cpu->f = f;
+            cpu->q = 1;
         } else {
-            uint8_t *p = reg8_ptr(cpu, dec.reg1);
+            uint8_t *p = reg8_ptr_p(cpu, dec.reg1, dec.prefix);
             if (p) {
                 uint8_t v = *p + 1;
                 *p = v;
-                uint8_t f = cpu->f & (Z80_FLAG_C);
+                uint8_t f = (cpu->f & Z80_FLAG_C) | xy_from(v);
                 if (v == 0) f |= Z80_FLAG_Z;
                 if (v & 0x80) f |= Z80_FLAG_S;
                 if ((v & 0xF) == 0) f |= Z80_FLAG_H;
                 if (v == 0x80) f |= Z80_FLAG_PV;
                 cpu->f = f;
+                cpu->q = 1;
             }
         }
         break;
 
     case Z80_OP_DEC_R:
-        /* similar but subtract 1, set N */
         if (dec.reg1 == 6) {
             uint16_t a = effective_addr(cpu, &dec, cpu->hl);
             uint8_t v = cpu->mem[a] - 1;
             cpu->mem[a] = v;
-            uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N;
+            uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N | xy_from(v);
             if (v == 0) f |= Z80_FLAG_Z;
             if (v & 0x80) f |= Z80_FLAG_S;
             if ((v & 0xF) == 0xF) f |= Z80_FLAG_H;
             if (v == 0x7F) f |= Z80_FLAG_PV;
             cpu->f = f;
+            cpu->q = 1;
         } else {
-            uint8_t *p = reg8_ptr(cpu, dec.reg1);
+            uint8_t *p = reg8_ptr_p(cpu, dec.reg1, dec.prefix);
             if (p) {
                 uint8_t v = *p - 1;
                 *p = v;
-                uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N;
+                uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N | xy_from(v);
                 if (v == 0) f |= Z80_FLAG_Z;
                 if (v & 0x80) f |= Z80_FLAG_S;
                 if ((v & 0xF) == 0xF) f |= Z80_FLAG_H;
                 if (v == 0x7F) f |= Z80_FLAG_PV;
                 cpu->f = f;
+                cpu->q = 1;
             }
         }
         break;
@@ -387,7 +429,7 @@ int z80_step(z80_cpu_t *cpu) {
         {
             uint8_t b = read_reg8(cpu, 6, &dec);
             uint8_t res = cpu->a - b;
-            set_flags_sub(cpu, cpu->a, b, res);
+            set_flags_cp(cpu, cpu->a, b, res);
         }
         break;
 
@@ -409,13 +451,14 @@ int z80_step(z80_cpu_t *cpu) {
             uint8_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
             uint16_t wide = (uint16_t)cpu->a + b + cin;
             uint8_t res = (uint8_t)wide;
-            uint8_t f = 0;
+            uint8_t f = xy_from(res);
             if (res == 0) f |= Z80_FLAG_Z;
             if (res & 0x80) f |= Z80_FLAG_S;
             if (((cpu->a & 0xF) + (b & 0xF) + cin) > 0xF) f |= Z80_FLAG_H;
             if (wide > 0xFF) f |= Z80_FLAG_C;
             if (((cpu->a ^ b) & 0x80) == 0 && ((res ^ cpu->a) & 0x80)) f |= Z80_FLAG_PV;
             cpu->f = f;
+            cpu->q = 1;
             cpu->a = res;
         }
         break;
@@ -426,13 +469,14 @@ int z80_step(z80_cpu_t *cpu) {
             uint8_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
             uint16_t wide = (uint16_t)cpu->a + b + cin;
             uint8_t res = (uint8_t)wide;
-            uint8_t f = 0;
+            uint8_t f = xy_from(res);
             if (res == 0) f |= Z80_FLAG_Z;
             if (res & 0x80) f |= Z80_FLAG_S;
             if (((cpu->a & 0xF) + (b & 0xF) + cin) > 0xF) f |= Z80_FLAG_H;
             if (wide > 0xFF) f |= Z80_FLAG_C;
             if (((cpu->a ^ b) & 0x80) == 0 && ((res ^ cpu->a) & 0x80)) f |= Z80_FLAG_PV;
             cpu->f = f;
+            cpu->q = 1;
             cpu->a = res;
         }
         break;
@@ -446,13 +490,14 @@ int z80_step(z80_cpu_t *cpu) {
             uint8_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
             int wide = (int)cpu->a - b - cin;
             uint8_t res = (uint8_t)wide;
-            uint8_t f = Z80_FLAG_N;
+            uint8_t f = Z80_FLAG_N | xy_from(res);
             if (res == 0) f |= Z80_FLAG_Z;
             if (res & 0x80) f |= Z80_FLAG_S;
             if (((cpu->a & 0xF) - (b & 0xF) - cin) & 0x10) f |= Z80_FLAG_H;
             if (wide < 0) f |= Z80_FLAG_C;
             if (((cpu->a ^ b) & 0x80) && ((res ^ cpu->a) & 0x80)) f |= Z80_FLAG_PV;
             cpu->f = f;
+            cpu->q = 1;
             cpu->a = res;
         }
         break;
@@ -463,25 +508,30 @@ int z80_step(z80_cpu_t *cpu) {
             uint8_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
             int wide = (int)cpu->a - b - cin;
             uint8_t res = (uint8_t)wide;
-            uint8_t f = Z80_FLAG_N;
+            uint8_t f = Z80_FLAG_N | xy_from(res);
             if (res == 0) f |= Z80_FLAG_Z;
             if (res & 0x80) f |= Z80_FLAG_S;
             if (((cpu->a & 0xF) - (b & 0xF) - cin) & 0x10) f |= Z80_FLAG_H;
             if (wide < 0) f |= Z80_FLAG_C;
             if (((cpu->a ^ b) & 0x80) && ((res ^ cpu->a) & 0x80)) f |= Z80_FLAG_PV;
             cpu->f = f;
+            cpu->q = 1;
             cpu->a = res;
         }
         break;
 
     case Z80_OP_EX_SP_HL:
         {
+            /* DD/FD prefix selects IX/IY for this opcode. */
             uint8_t lo = cpu->mem[cpu->sp];
             uint8_t hi = cpu->mem[(cpu->sp + 1) & 0xFFFF];
-            cpu->mem[cpu->sp] = cpu->l;
-            cpu->mem[(cpu->sp + 1) & 0xFFFF] = cpu->h;
-            cpu->l = lo;
-            cpu->h = hi;
+            uint16_t *dst = (dec.prefix == 0xDD) ? &cpu->ix
+                          : (dec.prefix == 0xFD) ? &cpu->iy
+                          : &cpu->hl;
+            cpu->mem[cpu->sp]     = (uint8_t)(*dst & 0xFF);
+            cpu->mem[(cpu->sp + 1) & 0xFFFF] = (uint8_t)(*dst >> 8);
+            *dst = lo | ((uint16_t)hi << 8);
+            cpu->memptr = *dst;
         }
         break;
 
@@ -547,19 +597,20 @@ int z80_step(z80_cpu_t *cpu) {
         {
             uint8_t b = read_reg8(cpu, dec.reg1, &dec);
             uint8_t res = cpu->a - b;
-            set_flags_sub(cpu, cpu->a, b, res);
+            set_flags_cp(cpu, cpu->a, b, res);
         }
         break;
 
     case Z80_OP_CP_A_N:
         {
             uint8_t res = cpu->a - dec.imm8;
-            set_flags_sub(cpu, cpu->a, dec.imm8, res);
+            set_flags_cp(cpu, cpu->a, dec.imm8, res);
         }
         break;
 
     case Z80_OP_JP_NN:
         cpu->pc = dec.imm16;
+        cpu->memptr = dec.imm16;
         if (cpu->pc == CPM_BDOS_ENTRY) {
             int cont = cpm_bdos_dispatch(cpu);
             if (!cont) return 1;
@@ -574,6 +625,8 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_JP_CC_NN:
+        /* MEMPTR = nn regardless of branch taken (per Sean Young). */
+        cpu->memptr = dec.imm16;
         if (cond_true(cpu, dec.cc)) {
             cpu->pc = dec.imm16;
             if (cpu->pc == CPM_BDOS_ENTRY) {
@@ -615,11 +668,14 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_JR_E:
         cpu->pc = (old_pc + dec.bytes + dec.disp) & 0xFFFF;
+        cpu->memptr = cpu->pc;
         break;
 
     case Z80_OP_JR_CC_E:
-        if (cond_true(cpu, dec.cc))
+        if (cond_true(cpu, dec.cc)) {
             cpu->pc = (old_pc + dec.bytes + dec.disp) & 0xFFFF;
+            cpu->memptr = cpu->pc;
+        }
         break;
 
     case Z80_OP_CALL_NN:
@@ -628,6 +684,7 @@ int z80_step(z80_cpu_t *cpu) {
         cpu->mem[cpu->sp]     = (cpu->pc) & 0xFF;
         cpu->mem[cpu->sp + 1] = (cpu->pc >> 8) & 0xFF;
         cpu->pc = dec.imm16;
+        cpu->memptr = dec.imm16;
 
         /* CP/M BDOS / warm boot trap */
         if (cpu->pc == CPM_BDOS_ENTRY || cpu->pc == CPM_WBOOT_ENTRY) {
@@ -658,6 +715,7 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_CALL_CC_NN:
+        cpu->memptr = dec.imm16;
         if (cond_true(cpu, dec.cc)) {
             cpu->sp = (cpu->sp - 2) & 0xFFFF;
             cpu->mem[cpu->sp]     = (cpu->pc) & 0xFF;
@@ -669,6 +727,7 @@ int z80_step(z80_cpu_t *cpu) {
     case Z80_OP_RET:
         cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
         cpu->sp = (cpu->sp + 2) & 0xFFFF;
+        cpu->memptr = cpu->pc;
         if (cpu->pc == 0x0000) {
             /* Classic CP/M .COM final RET to warm boot */
             return 1;   /* clean exit */
@@ -679,6 +738,7 @@ int z80_step(z80_cpu_t *cpu) {
         if (cond_true(cpu, dec.cc)) {
             cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
             cpu->sp = (cpu->sp + 2) & 0xFFFF;
+            cpu->memptr = cpu->pc;
         }
         break;
 
@@ -777,8 +837,10 @@ int z80_step(z80_cpu_t *cpu) {
 
     case Z80_OP_DJNZ:
         cpu->b--;
-        if (cpu->b != 0)
+        if (cpu->b != 0) {
             cpu->pc = (old_pc + dec.bytes + dec.disp) & 0xFFFF;
+            cpu->memptr = cpu->pc;
+        }
         break;
 
     case Z80_OP_RST:
@@ -786,6 +848,7 @@ int z80_step(z80_cpu_t *cpu) {
         cpu->mem[cpu->sp]     = cpu->pc & 0xFF;
         cpu->mem[(cpu->sp + 1) & 0xFFFF] = cpu->pc >> 8;
         cpu->pc = dec.imm8;
+        cpu->memptr = cpu->pc;
         break;
 
     case Z80_OP_OUT_N_A:
@@ -802,17 +865,27 @@ int z80_step(z80_cpu_t *cpu) {
     case Z80_OP_LDIR:
     case Z80_OP_LDDR:
         /* Extremely common in CP/M for screen and disk buffers. We run the
-         * whole block copy atomically; BC always reaches 0 when we return.
-         * Flags at exit: PV=0, H=0, N=0; S/Z/C preserved. */
+         * whole block copy atomically; BC reaches 0 on the last iteration.
+         * Flags at exit (final iter, BC==0):
+         *   PV=0, H=0, N=0; S/Z/C preserved.
+         *   Y = bit 1 of (A + transferred_byte_of_last_iter)
+         *   X = bit 3 of (A + transferred_byte_of_last_iter) */
         {
             int incr = (dec.type == Z80_OP_LDIR) ? 1 : -1;
+            uint8_t last_byte = 0;
             while (cpu->bc != 0) {
-                cpu->mem[cpu->de & 0xFFFF] = cpu->mem[cpu->hl & 0xFFFF];
+                last_byte = cpu->mem[cpu->hl & 0xFFFF];
+                cpu->mem[cpu->de & 0xFFFF] = last_byte;
                 cpu->hl = (cpu->hl + incr) & 0xFFFF;
                 cpu->de = (cpu->de + incr) & 0xFFFF;
                 cpu->bc = (cpu->bc - 1) & 0xFFFF;
             }
-            cpu->f &= ~(Z80_FLAG_PV | Z80_FLAG_H | Z80_FLAG_N);
+            uint8_t n = (uint8_t)(cpu->a + last_byte);
+            uint8_t f = cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_C);
+            f |= (n & Z80_FLAG_3);            /* X = bit 3 */
+            if (n & 0x02) f |= Z80_FLAG_5;    /* Y = bit 1 of n */
+            cpu->f = f;
+            cpu->q = 1;
         }
         break;
 
@@ -833,12 +906,18 @@ int z80_step(z80_cpu_t *cpu) {
             else src = read_rr(cpu, dec.reg1);
 
             uint32_t res = (uint32_t)*dst + src;
+            uint16_t r16 = (uint16_t)res;
             uint8_t f = cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV);
             if (res & 0x10000) f |= Z80_FLAG_C;
             if (((*dst & 0x0FFF) + (src & 0x0FFF)) & 0x1000) f |= Z80_FLAG_H;
             f &= ~Z80_FLAG_N;
+            f &= ~(Z80_FLAG_5 | Z80_FLAG_3);
+            f |= xy_from((uint8_t)(r16 >> 8));
+            /* MEMPTR = source HL + 1 */
+            cpu->memptr = (uint16_t)(*dst + 1);
             cpu->f = f;
-            *dst = (uint16_t)res;
+            cpu->q = 1;
+            *dst = r16;
         }
         break;
 
@@ -850,14 +929,15 @@ int z80_step(z80_cpu_t *cpu) {
             uint16_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
             uint32_t res = (uint32_t)a + b + cin;
             uint16_t r = (uint16_t)res;
-            uint8_t f = 0;
+            uint8_t f = xy_from((uint8_t)(r >> 8));
             if (r == 0) f |= Z80_FLAG_Z;
             if (r & 0x8000) f |= Z80_FLAG_S;
             if (((a & 0x0FFF) + (b & 0x0FFF) + cin) & 0x1000) f |= Z80_FLAG_H;
             if (res & 0x10000) f |= Z80_FLAG_C;
-            /* PV: signed overflow */
             if (((a ^ b) & 0x8000) == 0 && ((r ^ a) & 0x8000)) f |= Z80_FLAG_PV;
+            cpu->memptr = (uint16_t)(a + 1);
             cpu->f = f;
+            cpu->q = 1;
             cpu->hl = r;
         }
         break;
@@ -868,6 +948,7 @@ int z80_step(z80_cpu_t *cpu) {
             uint16_t v = (dec.reg1 == 3) ? cpu->sp : read_rr(cpu, dec.reg1);
             cpu->mem[dec.imm16 & 0xFFFF]       = v & 0xFF;
             cpu->mem[(dec.imm16 + 1) & 0xFFFF] = (v >> 8) & 0xFF;
+            cpu->memptr = (uint16_t)(dec.imm16 + 1);
         }
         break;
 
@@ -878,6 +959,7 @@ int z80_step(z80_cpu_t *cpu) {
                       | (cpu->mem[(dec.imm16 + 1) & 0xFFFF] << 8);
             if (dec.reg1 == 3) cpu->sp = v;
             else write_rr(cpu, dec.reg1, v);
+            cpu->memptr = (uint16_t)(dec.imm16 + 1);
         }
         break;
 
@@ -889,13 +971,15 @@ int z80_step(z80_cpu_t *cpu) {
             uint16_t cin = (cpu->f & Z80_FLAG_C) ? 1 : 0;
             uint32_t res = (uint32_t)a - b - cin;
             uint16_t r = (uint16_t)res;
-            uint8_t f = Z80_FLAG_N;
+            uint8_t f = Z80_FLAG_N | xy_from((uint8_t)(r >> 8));
             if (r == 0) f |= Z80_FLAG_Z;
             if (r & 0x8000) f |= Z80_FLAG_S;
             if (((a & 0x0FFF) - (b & 0x0FFF) - cin) & 0x1000) f |= Z80_FLAG_H;
             if (res & 0x10000) f |= Z80_FLAG_C;
             if (((a ^ b) & 0x8000) && ((r ^ a) & 0x8000)) f |= Z80_FLAG_PV;
+            cpu->memptr = (uint16_t)(a + 1);
             cpu->f = f;
+            cpu->q = 1;
             cpu->hl = r;
         }
         break;
@@ -907,6 +991,7 @@ int z80_step(z80_cpu_t *cpu) {
                        : cpu->hl;
             cpu->mem[dec.imm16 & 0xFFFF]       = v & 0xFF;
             cpu->mem[(dec.imm16 + 1) & 0xFFFF] = v >> 8;
+            cpu->memptr = (uint16_t)(dec.imm16 + 1);
         }
         break;
 
@@ -917,25 +1002,37 @@ int z80_step(z80_cpu_t *cpu) {
             if (dec.prefix == 0xDD) cpu->ix = v;
             else if (dec.prefix == 0xFD) cpu->iy = v;
             else cpu->hl = v;
+            cpu->memptr = (uint16_t)(dec.imm16 + 1);
         }
         break;
 
     case Z80_OP_CPL:
         cpu->a = ~cpu->a;
-        cpu->f |= (Z80_FLAG_H | Z80_FLAG_N);
+        cpu->f = (cpu->f & ~(Z80_FLAG_5 | Z80_FLAG_3))
+               | Z80_FLAG_H | Z80_FLAG_N | xy_from(cpu->a);
+        cpu->q = 1;
         break;
 
     case Z80_OP_SCF:
-        cpu->f = (cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV)) | Z80_FLAG_C;
+        {
+            /* XY: if the previous instruction modified F, source XY from A;
+             * otherwise source from (A | F_before). The Q quirk. */
+            uint8_t xy_src = prev_q ? cpu->a : (cpu->a | cpu->f);
+            cpu->f = (cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV))
+                   | Z80_FLAG_C | xy_from(xy_src);
+            cpu->q = 1;
+        }
         break;
 
     case Z80_OP_CCF:
         {
-            /* H = old C ; C = !old C ; N = 0. Other docs unchanged. */
             uint8_t old_c = cpu->f & Z80_FLAG_C;
-            cpu->f &= ~(Z80_FLAG_H | Z80_FLAG_N | Z80_FLAG_C);
-            if (old_c) cpu->f |= Z80_FLAG_H;
-            else       cpu->f |= Z80_FLAG_C;
+            uint8_t xy_src = prev_q ? cpu->a : (cpu->a | cpu->f);
+            cpu->f = (cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV))
+                   | (old_c ? Z80_FLAG_H : 0)
+                   | (old_c ? 0 : Z80_FLAG_C)
+                   | xy_from(xy_src);
+            cpu->q = 1;
         }
         break;
 
@@ -964,42 +1061,41 @@ int z80_step(z80_cpu_t *cpu) {
             }
 
             cpu->a = new_a;
-            uint8_t f = fnin | new_c | new_h;
+            uint8_t f = fnin | new_c | new_h | xy_from(new_a);
             if (new_a == 0) f |= Z80_FLAG_Z;
             if (new_a & 0x80) f |= Z80_FLAG_S;
-            int p = 0; for (int i = 0; i < 8; i++) p ^= (new_a >> i) & 1;
-            if (p == 0) f |= Z80_FLAG_PV;
+            f |= parity8(new_a);
             cpu->f = f;
+            cpu->q = 1;
         }
         break;
 
     case Z80_OP_NEG:
         {
-            uint8_t res = 0 - cpu->a;
-            /* flags for NEG (same as SUB A, A with A as operand) */
-            set_flags_sub(cpu, 0, cpu->a, res);
+            uint8_t a = cpu->a;
+            uint8_t res = 0 - a;
+            set_flags_sub(cpu, 0, a, res);
             cpu->a = res;
-            cpu->f |= Z80_FLAG_N;   /* NEG always sets N */
-            if (cpu->a == 0) cpu->f |= Z80_FLAG_Z; else cpu->f &= ~Z80_FLAG_Z;
         }
         break;
 
     case Z80_OP_LDI:
-        /* one step of LDIR, no repeat */
-        cpu->mem[cpu->de & 0xFFFF] = cpu->mem[cpu->hl & 0xFFFF];
-        cpu->hl++; cpu->de++; cpu->bc--;
-        /* P/V is set if BC != 0 after the decrement */
-        if (cpu->bc != 0) cpu->f |= Z80_FLAG_PV; else cpu->f &= ~Z80_FLAG_PV;
-        cpu->f &= ~Z80_FLAG_H;
-        cpu->f &= ~Z80_FLAG_N;
-        break;
-
     case Z80_OP_LDD:
-        cpu->mem[cpu->de & 0xFFFF] = cpu->mem[cpu->hl & 0xFFFF];
-        cpu->hl--; cpu->de--; cpu->bc--;
-        if (cpu->bc != 0) cpu->f |= Z80_FLAG_PV; else cpu->f &= ~Z80_FLAG_PV;
-        cpu->f &= ~Z80_FLAG_H;
-        cpu->f &= ~Z80_FLAG_N;
+        {
+            int incr = (dec.type == Z80_OP_LDI) ? 1 : -1;
+            uint8_t v = cpu->mem[cpu->hl & 0xFFFF];
+            cpu->mem[cpu->de & 0xFFFF] = v;
+            cpu->hl = (cpu->hl + incr) & 0xFFFF;
+            cpu->de = (cpu->de + incr) & 0xFFFF;
+            cpu->bc = (cpu->bc - 1) & 0xFFFF;
+            uint8_t n = (uint8_t)(cpu->a + v);
+            uint8_t f = cpu->f & (Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_C);
+            if (cpu->bc != 0) f |= Z80_FLAG_PV;
+            f |= (n & Z80_FLAG_3);            /* X = bit 3 of n */
+            if (n & 0x02) f |= Z80_FLAG_5;    /* Y = bit 1 of n */
+            cpu->f = f;
+            cpu->q = 1;
+        }
         break;
 
     case Z80_OP_RRD:
@@ -1023,12 +1119,12 @@ int z80_step(z80_cpu_t *cpu) {
             }
             cpu->a = new_a;
             cpu->mem[cpu->hl & 0xFFFF] = new_m;
-            uint8_t f = cpu->f & Z80_FLAG_C;
+            uint8_t f = (cpu->f & Z80_FLAG_C) | xy_from(new_a);
             if (new_a == 0) f |= Z80_FLAG_Z;
             if (new_a & 0x80) f |= Z80_FLAG_S;
-            int p = 0; for (int i = 0; i < 8; i++) p ^= (new_a >> i) & 1;
-            if (p == 0) f |= Z80_FLAG_PV;
+            f |= parity8(new_a);
             cpu->f = f;
+            cpu->q = 1;
         }
         break;
 
@@ -1041,18 +1137,24 @@ int z80_step(z80_cpu_t *cpu) {
              *   Flags: S, Z from cmp result. H per low-nibble borrow.
              *   PV = (BC after decrement != 0)
              *   N = 1
-             *   C unchanged. */
+             *   C unchanged.
+             *   X = bit 3 of n, Y = bit 1 of n, where n = A - (HL) - H_after. */
             uint8_t v = cpu->mem[cpu->hl & 0xFFFF];
             uint8_t res = cpu->a - v;
             uint8_t f = (cpu->f & Z80_FLAG_C) | Z80_FLAG_N;
             if (res == 0) f |= Z80_FLAG_Z;
             if (res & 0x80) f |= Z80_FLAG_S;
-            if ((cpu->a & 0xF) < (v & 0xF)) f |= Z80_FLAG_H;
+            uint8_t h = ((cpu->a & 0xF) < (v & 0xF)) ? Z80_FLAG_H : 0;
+            f |= h;
+            uint8_t n = (uint8_t)(res - (h ? 1 : 0));
+            f |= (n & Z80_FLAG_3);
+            if (n & 0x02) f |= Z80_FLAG_5;
             int incr = (dec.type == Z80_OP_CPI || dec.type == Z80_OP_CPIR) ? 1 : -1;
             cpu->hl = (cpu->hl + incr) & 0xFFFF;
             cpu->bc = (cpu->bc - 1) & 0xFFFF;
             if (cpu->bc != 0) f |= Z80_FLAG_PV;
             cpu->f = f;
+            cpu->q = 1;
             /* Repeating forms: stay on the instruction until BC==0 or match. */
             if ((dec.type == Z80_OP_CPIR || dec.type == Z80_OP_CPDR)
                 && cpu->bc != 0 && res != 0) {
@@ -1109,14 +1211,23 @@ int z80_step(z80_cpu_t *cpu) {
              *   H: 1
              *   Z = !b ;  PV = Z
              *   S = b only when n == 7 (else 0)
-             *   X (bit 3) and Y (bit 5) come from the operand byte for the
-             *   register form. (The (HL) and (IX+d) forms take XY from
-             *   MEMPTR / address high byte, which zexdoc doesn't check.) */
+             *   X (bit 3) and Y (bit 5):
+             *     - register form: from the operand byte
+             *     - BIT n,(HL):    from MEMPTR.high
+             *     - BIT n,(IX+d):  from high byte of the computed address */
             new_f &= Z80_FLAG_C;
             if (!b) new_f |= Z80_FLAG_Z | Z80_FLAG_PV;
             new_f |= Z80_FLAG_H;
             if (b && bit == 7) new_f |= Z80_FLAG_S;
-            new_f |= (val & 0x28);
+            uint8_t xy_byte;
+            if (indexed) {
+                xy_byte = (uint8_t)(addr >> 8);
+            } else if (r == 6) {
+                xy_byte = (uint8_t)(cpu->memptr >> 8);
+            } else {
+                xy_byte = val;
+            }
+            new_f |= xy_from(xy_byte);
             result = val;
         } else if (is_res) {
             int bit = (sub >> 3) & 7;
@@ -1187,14 +1298,17 @@ int z80_step(z80_cpu_t *cpu) {
         /* Flag updates for rotate/shift only. RES and SET do not modify
          * any flag on real Z80. */
         if (!is_bit && !is_res && !is_set) {
-            if (result == 0) new_f |= Z80_FLAG_Z; else new_f &= ~Z80_FLAG_Z;
-            if (result & 0x80) new_f |= Z80_FLAG_S; else new_f &= ~Z80_FLAG_S;
-            int parity = 0;
-            for (int i = 0; i < 8; i++) parity ^= (result >> i) & 1;
-            if (parity == 0) new_f |= Z80_FLAG_PV; else new_f &= ~Z80_FLAG_PV;
+            new_f &= Z80_FLAG_C;   /* keep only C from new_f */
+            if (result == 0) new_f |= Z80_FLAG_Z;
+            if (result & 0x80) new_f |= Z80_FLAG_S;
+            new_f |= parity8(result);
+            new_f |= xy_from(result);
         }
 
-        if (!is_res && !is_set) cpu->f = new_f;
+        if (!is_res && !is_set) {
+            cpu->f = new_f;
+            cpu->q = 1;
+        }
         break;
     }
 

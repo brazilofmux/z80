@@ -122,6 +122,15 @@ typedef struct z80_cpu {
     uint16_t flag_op1;
     uint16_t flag_op2;
     uint8_t  flag_result;
+
+    /* MEMPTR / WZ — internal 16-bit register the real Z80 maintains.
+     * Several instructions write it; BIT n,(HL) / BIT n,(IX+d) read its
+     * high byte to source the undocumented X/Y flags. */
+    uint16_t memptr;
+
+    /* Q — whether the previous instruction modified F. SCF/CCF on real
+     * silicon source XY differently depending on this. */
+    uint8_t  q;
 } z80_cpu_t;
 
 /* Size assertion so we can keep the struct cache-friendly and JIT-friendly */
