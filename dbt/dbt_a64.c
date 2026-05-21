@@ -397,10 +397,12 @@ static int is_call_trap_target(uint16_t pc) {
 /* Return 1 if this op type, in this prefix/register configuration, is
  * something the first-cut translator can emit. */
 static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
-    /* CB/ED prefixes are full alternate ISAs — first cut skips them
-     * entirely. DD/FD (IX/IY) prefix is accepted on a per-op basis below;
-     * each translatable op explicitly opts in. */
-    if (dec->prefix == 0xCB || dec->prefix == 0xED) return 0;
+    /* ED is a separate ISA — not yet translated. CB-prefix is accepted
+     * on the Z80_OP_CB case below; DD CB / FD CB (which decode with
+     * prefix==DD or FD AND type==Z80_OP_CB) we still skip — the dual
+     * register+memory writeback for the indexed form needs its own
+     * codegen pass. */
+    if (dec->prefix == 0xED) return 0;
     int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
 
     switch (dec->type) {
@@ -526,6 +528,9 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
         return 1;
     case Z80_OP_DJNZ:
         return 1;
+    case Z80_OP_CB:
+        /* Plain CB-prefix only — DD CB / FD CB is held back. */
+        return dec->prefix == 0xCB;
     default:
         return 0;
     }
@@ -895,6 +900,91 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_dec8);
         emit_strb_imm(e, A64_W0, A64_W19, (uint32_t)off);
         return OP_MODIFIES_F;
+    }
+
+    /* ---- CB-prefix: rotate/shift (sub<0x40), BIT (0x40..0x7F),
+     *      RES (0x80..0xBF), SET (0xC0..0xFF).
+     * Sub-byte layout: family in bits 6..7, n (bit number or rotate kind)
+     * in bits 3..5, reg encoding in bits 0..2 (6 = (HL)). */
+    case Z80_OP_CB: {
+        uint8_t sub = dec->imm8;
+        int     r   = sub & 7;
+        int     grp = (sub >> 3) & 7;
+        unsigned family = sub >> 6;  /* 0=rot/shift, 1=BIT, 2=RES, 3=SET */
+        int     is_mem = (r == 6);
+
+        /* W2 = working value. For mem ops, also keep the addr in W10. */
+        if (is_mem) {
+            emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
+            emit_ldrb_reg_uxtw(e, A64_W2, A64_W20, A64_W10);
+        } else {
+            int off = reg8_offset(r);
+            emit_ldrb_imm(e, A64_W2, A64_W19, (uint32_t)off);
+        }
+
+        if (family == 0) {
+            /* Rotate / shift. Call helper(cpu, val); helper returns
+             * new value in W0 and sets cpu->f. */
+            static void *const helpers[8] = {
+                (void *)z80_jit_rlc, (void *)z80_jit_rrc,
+                (void *)z80_jit_rl,  (void *)z80_jit_rr,
+                (void *)z80_jit_sla, (void *)z80_jit_sra,
+                (void *)z80_jit_sll, (void *)z80_jit_srl,
+            };
+            emit_mov_w32_w32(e, A64_W1, A64_W2);     /* W1 = val (helper arg) */
+            emit_call_helper(e, helpers[grp]);
+            /* Helper clobbered W10; reload it before storeb. */
+            if (is_mem) {
+                emit_mov_w32_w32(e, A64_W9, A64_W0);
+                emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
+                emit_guest_storeb_w9_at_w10_smc(e);
+            } else {
+                int off = reg8_offset(r);
+                emit_strb_imm(e, A64_W0, A64_W19, (uint32_t)off);
+            }
+            return OP_MODIFIES_F;
+        }
+
+        if (family == 1) {
+            /* BIT n,<src>. No write-back. XY source byte:
+             *   register form : the operand value
+             *   (HL) form     : memptr.high */
+            emit_mov_w32_w32(e, A64_W1, A64_W2);     /* val */
+            emit_movz_w32(e, A64_W2, (uint8_t)grp, 0); /* bit number */
+            if (is_mem) {
+                /* W3 = (memptr >> 8) & 0xFF */
+                emit_ldrb_imm(e, A64_W3, A64_W19, OFF_MEMPTR + 1);
+            } else {
+                emit_mov_w32_w32(e, A64_W3, A64_W1);   /* xy_byte = val */
+            }
+            emit_call_helper(e, (void *)(uintptr_t)z80_jit_bit);
+            return OP_MODIFIES_F;
+        }
+
+        /* RES / SET: inline bit mask. No flag change.
+         *
+         * Both go via MOVZ-to-scratch + AND/ORR-register because the
+         * AArch64 logical-immediate encoding can't express many of the
+         * 8-bit masks we need (e.g. 0xFB = ~0x04 has a single zero bit
+         * and isn't a valid bitmask immediate). */
+        uint8_t mask = (uint8_t)(1u << grp);
+        if (family == 2) {
+            /* RES n,<src> : val &= ~mask */
+            emit_movz_w32(e, A64_W11, (uint8_t)~mask, 0);
+            emit_and_w32(e, A64_W2, A64_W2, A64_W11);
+        } else {
+            /* SET n,<src> : val |= mask */
+            emit_movz_w32(e, A64_W11, mask, 0);
+            emit_orr_w32(e, A64_W2, A64_W2, A64_W11);
+        }
+        if (is_mem) {
+            emit_mov_w32_w32(e, A64_W9, A64_W2);
+            emit_guest_storeb_w9_at_w10_smc(e);
+        } else {
+            int off = reg8_offset(r);
+            emit_strb_imm(e, A64_W2, A64_W19, (uint32_t)off);
+        }
+        return OP_FALL_THROUGH;
     }
 
     case Z80_OP_JP_NN: {

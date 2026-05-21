@@ -30,6 +30,23 @@ void z80_jit_cp (z80_cpu_t *cpu, uint8_t b);   /* like SUB but A unchanged */
 uint8_t z80_jit_inc8(z80_cpu_t *cpu, uint8_t v);
 uint8_t z80_jit_dec8(z80_cpu_t *cpu, uint8_t v);
 
+/* CB-prefix rotate/shift family. Take val, return new val, set
+ * C/S/Z/PV/X/Y from result (or shifted-out bit for C); H=0, N=0.
+ * Mirrors the CB body of core/z80_interp.c. */
+uint8_t z80_jit_rlc(z80_cpu_t *cpu, uint8_t val);
+uint8_t z80_jit_rrc(z80_cpu_t *cpu, uint8_t val);
+uint8_t z80_jit_rl (z80_cpu_t *cpu, uint8_t val);
+uint8_t z80_jit_rr (z80_cpu_t *cpu, uint8_t val);
+uint8_t z80_jit_sla(z80_cpu_t *cpu, uint8_t val);
+uint8_t z80_jit_sra(z80_cpu_t *cpu, uint8_t val);
+uint8_t z80_jit_sll(z80_cpu_t *cpu, uint8_t val);   /* undocumented */
+uint8_t z80_jit_srl(z80_cpu_t *cpu, uint8_t val);
+
+/* CB-prefix BIT n,<src>. Flag-only (no writeback). C preserved; H=1, N=0;
+ * Z = PV = !bit; S = (bit && n==7). XY come from xy_byte, which the JIT
+ * passes as val (register form) or memptr.high (HL form). */
+void z80_jit_bit(z80_cpu_t *cpu, uint8_t val, uint8_t bit_n, uint8_t xy_byte);
+
 /* Self-modifying-code detector. Called after every JIT-emitted guest
  * store. Checks dbt->code_bitmap[addr]: if the byte lay inside a
  * currently-cached translated block, blow away the entire cache so the
