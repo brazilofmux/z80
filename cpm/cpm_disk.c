@@ -182,8 +182,21 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     char host_name[64];
     FILE *fp;
 
-    /* No special casing — let the program's own FCB at 5C (usually "ZORK1.DAT")
-     * open normally. The menu stub constructs this FCB itself. */
+    /* If an existing slot owns this FCB, retire it first. MS COBOL (and
+     * many CP/M apps) reuse one FCB for a series of files — the FCB
+     * itself holds the directory state in real CP/M, so re-opening is
+     * "switch to a different file at the same FCB address," not
+     * "duplicate open." Without this, get_file_slot_from_fcb keeps
+     * returning the first (stale) match and reads come from the wrong
+     * file. The compiler's "?Overlay Not Found" was exactly this. */
+    {
+        int prev = get_file_slot_from_fcb(fcb_addr);
+        if (prev >= 0) {
+            fclose(open_files[prev].fp);
+            open_files[prev].fp = NULL;
+            open_fcb_addr[prev] = 0;
+        }
+    }
 
     fcb_to_host_name(fcb, host_name, sizeof(host_name));
     {
@@ -193,7 +206,11 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
         host_name[sizeof(host_name)-1] = 0;
     }
 
-    fp = fopen(host_name, "rb");
+    /* "r+b" — CP/M's OPEN returns a handle the program can read AND
+     * write through. Opening with plain "rb" worked for read-only
+     * apps (games etc.) but breaks compilers that re-OPEN a file they
+     * just MADE and then write into it (MS COBOL's "DISK FULL"). */
+    fp = fopen(host_name, "r+b");
     if (!fp) {
         cpu->a = 0xFF;   /* CP/M open failure */
         return 1;
@@ -441,6 +458,16 @@ int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     char host_name[64];
     FILE *fp;
 
+    /* Same FCB-reuse retirement as open_file. */
+    {
+        int prev = get_file_slot_from_fcb(fcb_addr);
+        if (prev >= 0) {
+            fclose(open_files[prev].fp);
+            open_files[prev].fp = NULL;
+            open_fcb_addr[prev] = 0;
+        }
+    }
+
     fcb_to_host_name(fcb, host_name, sizeof(host_name));
     {
         char full[PATH_MAX];
@@ -449,8 +476,9 @@ int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
         host_name[sizeof(host_name)-1] = 0;
     }
 
-    /* Create/truncate the file */
-    fp = fopen(host_name, "wb");
+    /* Create/truncate; allow subsequent reads too (CP/M doesn't
+     * distinguish create-write from create-readwrite). */
+    fp = fopen(host_name, "w+b");
     if (!fp) {
         cpu->a = 0xFF;
         return 1;
@@ -476,6 +504,40 @@ int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     cpu->a = 0;
     /* leave original drive byte in fcb[0] */
 
+    return 1;
+}
+
+int cpm_bdos_delete_file(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    uint8_t *fcb = &cpu->mem[fcb_addr];
+    char host_name[64];
+
+    /* If the file is currently open via this FCB, close it first. */
+    {
+        int prev = get_file_slot_from_fcb(fcb_addr);
+        if (prev >= 0) {
+            fclose(open_files[prev].fp);
+            open_files[prev].fp = NULL;
+            open_fcb_addr[prev] = 0;
+        }
+    }
+
+    fcb_to_host_name(fcb, host_name, sizeof(host_name));
+    {
+        char full[PATH_MAX];
+        make_host_path(host_name, full, sizeof(full));
+        strncpy(host_name, full, sizeof(host_name));
+        host_name[sizeof(host_name)-1] = 0;
+    }
+
+    /* CP/M returns 0xFF when no file matched, 0..3 (directory code)
+     * when a match was found and deleted. We don't track directory
+     * positions, so return 0 on success and 0xFF on not-found. */
+    if (unlink(host_name) == 0) {
+        cpu->a = 0;
+    } else {
+        cpu->a = 0xFF;
+    }
     return 1;
 }
 

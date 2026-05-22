@@ -15,7 +15,7 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
 
     /* Light startup logging to help bring-up of real binaries (first ~30 calls) */
     static int early_calls = 0;
-    if (cpm_debug && early_calls < 30) {
+    if (cpm_debug && (early_calls < 30 || func == 15 || func == 22 || func == 19)) {
         early_calls++;
         if (func == 33 || func == 34) {
             /* Dump the random record the game is asking for */
@@ -23,6 +23,19 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
             uint32_t rec = (uint32_t)fcb[33] | ((uint32_t)fcb[34]<<8) | ((uint32_t)fcb[35]<<16);
             fprintf(stderr, "[BDOS #%d] func=%d (random %s) DE=%04X rec=%u (0x%06X)\n",
                     early_calls, func, (func==33?"read":"write"), cpu->de, rec, rec);
+        } else if (func == 15 || func == 22 || func == 19 || func == 17) {
+            /* Filename from FCB */
+            uint8_t *fcb = &cpu->mem[cpu->de];
+            char name[13];
+            int j = 0;
+            for (int i = 1; i < 9 && fcb[i] != ' '; i++) name[j++] = fcb[i];
+            name[j++] = '.';
+            for (int i = 9; i < 12 && fcb[i] != ' '; i++) name[j++] = fcb[i];
+            name[j] = 0;
+            fprintf(stderr, "[BDOS #%d] func=%d (%s) FCB@%04X drive=%d name='%s'\n",
+                    early_calls, func,
+                    func == 15 ? "OPEN" : func == 22 ? "MAKE" : func == 19 ? "DEL" : "SFIRST",
+                    cpu->de, fcb[0], name);
         } else {
             fprintf(stderr, "[BDOS #%d] func=%d DE=%04X\n", early_calls, func, cpu->de);
         }
@@ -124,6 +137,9 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
 
     case CPM_F_MAKE:     /* 22 - create file */
         return cpm_bdos_make_file(cpu, cpu->de);
+
+    case CPM_F_DELETE:   /* 19 - delete file (by FCB) */
+        return cpm_bdos_delete_file(cpu, cpu->de);
 
     case CPM_F_WRITE:    /* 21 - write sequential */
         return cpm_bdos_write_sequential(cpu, cpu->de);

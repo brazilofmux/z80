@@ -137,6 +137,7 @@ int  cpm_bdos_set_dma(z80_cpu_t *cpu);  /* uses DE */
 int  cpm_bdos_search_first(z80_cpu_t *cpu, uint16_t fcb_addr);
 int  cpm_bdos_search_next(z80_cpu_t *cpu);
 int  cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr);
+int  cpm_bdos_delete_file(z80_cpu_t *cpu, uint16_t fcb_addr);
 int  cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr);
 
 /* Random record access (BDOS 33/34) */
