@@ -68,6 +68,14 @@ test:
 	@echo "No tests yet — the monster is still in the larval stage."
 	@echo "Soon: ./$(TARGET) -i tests/hello.com && ./$(TARGET) -V tests/hello.com"
 
+# Run the MS COBOL square-root benchmark (jit vs interp).
+# Override N=... for a different workload size.
+N ?= 2000
+.PHONY: bench
+bench: $(TARGET)
+	@bench/squaro.sh $(N) jit
+	@bench/squaro.sh $(N) interp
+
 # Build the tiny hello.com test program
 tests/hello.com: tools/mkhello
 	@mkdir -p tests
