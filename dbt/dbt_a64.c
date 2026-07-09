@@ -469,7 +469,13 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_RLA:
     case Z80_OP_RRA:
     case Z80_OP_DAA:
+    case Z80_OP_CPL:
+    case Z80_OP_SCF:
+    case Z80_OP_CCF:
         return !idx;
+
+    case Z80_OP_EX_SP_HL:
+        return 1;   /* DD/FD forms exchange IX/IY */
 
     /* 8-bit ALU A,<src>. reg=6 means (HL) / (IX+d) / (IY+d); the helper
      * path takes a byte either way. Codes 8/9 require DD/FD prefix —
@@ -606,7 +612,11 @@ static void emit_alu_src_from_reg(emit_t *e, int reg, uint8_t prefix) {
     }
 }
 
-static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
+/* prev_q: 1/0 if the previous instruction in this block statically
+ * did/didn't write F (SCF/CCF need it for the XY Q-quirk); -1 when this
+ * is the first op of the block and the live cpu->q must be consulted. */
+static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
+                        int prev_q) {
     switch (dec->type) {
     case Z80_OP_NOP:
         return OP_FALL_THROUGH;
@@ -936,6 +946,89 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_DAA:
         emit_call_helper(e, (void *)(uintptr_t)z80_jit_daa);
         return OP_MODIFIES_F;
+
+    case Z80_OP_CPL: {
+        /* A = ~A. F: H and N set, XY from new A, S/Z/PV/C preserved. */
+        emit_ldrb_imm(e, A64_W9, A64_W19, OFF_A);
+        emit_mvn_w32(e, A64_W9, A64_W9);
+        (void)emit_and_w32_imm(e, A64_W9, A64_W9, 0xFF);
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_A);
+        emit_ldrb_imm(e, A64_W11, A64_W19, OFF_F);
+        emit_movz_w32(e, A64_W12, 0xFF & ~(Z80_FLAG_5 | Z80_FLAG_3), 0);
+        emit_and_w32(e, A64_W11, A64_W11, A64_W12);
+        emit_movz_w32(e, A64_W12, Z80_FLAG_H | Z80_FLAG_N, 0);
+        emit_orr_w32(e, A64_W11, A64_W11, A64_W12);
+        emit_movz_w32(e, A64_W12, Z80_FLAG_5 | Z80_FLAG_3, 0);
+        emit_and_w32(e, A64_W12, A64_W9, A64_W12);
+        emit_orr_w32(e, A64_W11, A64_W11, A64_W12);
+        emit_strb_imm(e, A64_W11, A64_W19, OFF_F);
+        return OP_SETS_F_INLINE;
+    }
+
+    /* SCF / CCF share the Q quirk: XY sources from A when the PREVIOUS
+     * instruction modified F (prev_q), else from A|F. Mid-block the
+     * translator knows prev_q statically; first-in-block it's the live
+     * cpu->q value, so we select at runtime. Leaves xy_src in W13;
+     * expects A in W9 and F in W11. */
+    case Z80_OP_SCF:
+    case Z80_OP_CCF: {
+        emit_ldrb_imm(e, A64_W9,  A64_W19, OFF_A);
+        emit_ldrb_imm(e, A64_W11, A64_W19, OFF_F);
+        if (prev_q > 0) {
+            emit_mov_w32_w32(e, A64_W13, A64_W9);
+        } else if (prev_q == 0) {
+            emit_orr_w32(e, A64_W13, A64_W9, A64_W11);
+        } else {
+            emit_ldrb_imm(e, A64_W12, A64_W19, OFF_Q);
+            emit_orr_w32(e, A64_W13, A64_W9, A64_W11);
+            emit_cmp_w32_imm(e, A64_W12, 0);
+            emit_csel_w32(e, A64_W13, A64_W9, A64_W13, A64_COND_NE);
+        }
+        if (dec->type == Z80_OP_SCF) {
+            /* F = (F & (S|Z|PV)) | C | XY(xy_src) */
+            emit_movz_w32(e, A64_W12, Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV, 0);
+            emit_and_w32(e, A64_W11, A64_W11, A64_W12);
+            (void)emit_orr_w32_imm(e, A64_W11, A64_W11, Z80_FLAG_C);
+        } else {
+            /* CCF: F = (F & (S|Z|PV)) | (old_c ? H : C) | XY(xy_src) */
+            (void)emit_and_w32_imm(e, A64_W12, A64_W11, Z80_FLAG_C);  /* old_c */
+            (void)emit_eor_w32_imm(e, A64_W14, A64_W12, 1);           /* new C */
+            emit_lsl_w32_imm(e, A64_W12, A64_W12, 4);                 /* old_c -> H */
+            emit_movz_w32(e, A64_W10, Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV, 0);
+            emit_and_w32(e, A64_W11, A64_W11, A64_W10);
+            emit_orr_w32(e, A64_W11, A64_W11, A64_W14);
+            emit_orr_w32(e, A64_W11, A64_W11, A64_W12);
+        }
+        emit_movz_w32(e, A64_W12, Z80_FLAG_5 | Z80_FLAG_3, 0);
+        emit_and_w32(e, A64_W12, A64_W13, A64_W12);
+        emit_orr_w32(e, A64_W11, A64_W11, A64_W12);
+        emit_strb_imm(e, A64_W11, A64_W19, OFF_F);
+        return OP_SETS_F_INLINE;
+    }
+
+    case Z80_OP_EX_SP_HL: {
+        /* Exchange (SP) with HL (or IX/IY under DD/FD); memptr = new
+         * value. Stack writes skip the SMC helper — same justification
+         * as PUSH: the guest stack essentially never overlaps code. */
+        int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
+        uint32_t off_dst = idx ? (uint32_t)idx_reg_offset(dec->prefix) : OFF_HL;
+
+        emit_ldrh_imm(e, A64_W11, A64_W19, OFF_SP);
+        emit_ldrb_reg_uxtw(e, A64_W9, A64_W20, A64_W11);    /* lo = mem[sp] */
+        emit_add_mask16(e, A64_W12, A64_W11, 1);
+        emit_ldrb_reg_uxtw(e, A64_W10, A64_W20, A64_W12);   /* hi = mem[sp+1] */
+
+        emit_ldrh_imm(e, A64_W13, A64_W19, off_dst);
+        emit_strb_reg_uxtw(e, A64_W13, A64_W20, A64_W11);   /* mem[sp] = dst.lo */
+        emit_lsr_w32_imm(e, A64_W14, A64_W13, 8);
+        emit_strb_reg_uxtw(e, A64_W14, A64_W20, A64_W12);   /* mem[sp+1] = dst.hi */
+
+        emit_lsl_w32_imm(e, A64_W10, A64_W10, 8);
+        emit_orr_w32(e, A64_W9, A64_W9, A64_W10);           /* new dst */
+        emit_strh_imm(e, A64_W9, A64_W19, off_dst);
+        emit_strh_imm(e, A64_W9, A64_W19, OFF_MEMPTR);
+        return OP_FALL_THROUGH;
+    }
 
     case Z80_OP_EX_DE_HL: {
         emit_ldrh_imm(e, A64_W9,  A64_W19, OFF_DE);
@@ -1508,6 +1601,7 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     uint32_t insns = 0;
     int ended_by_branch = 0;
     int q_mode = Q_CLEAR;
+    int prev_q = -1;   /* first op: prev insn's q is the live cpu->q */
 
     while (insns < MAX_BLOCK_INSNS) {
         z80_decoded dec;
@@ -1523,10 +1617,11 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
             break;
         }
 
-        unsigned r = emit_op(&e, &dec, pc_after);
+        unsigned r = emit_op(&e, &dec, pc_after, prev_q);
         if      (r & OP_MODIFIES_F)    q_mode = Q_KEEP;
         else if (r & OP_SETS_F_INLINE) q_mode = Q_SET;
         else                           q_mode = Q_CLEAR;
+        prev_q = (q_mode != Q_CLEAR);
         ended_by_branch = (r & OP_ENDS_BLOCK) != 0;
         insns++;
         pc = pc_after;
