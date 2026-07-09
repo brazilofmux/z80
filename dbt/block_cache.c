@@ -16,7 +16,8 @@ static inline uint32_t cache_index(uint16_t pc) {
 
 z80_block_entry_t *dbt_cache_lookup(z80_dbt_t *dbt, uint16_t pc) {
     z80_block_entry_t *e = &dbt->cache[cache_index(pc)];
-    if (e->guest_pc == (uint32_t)pc) {
+    if (e->guest_pc == (uint32_t)pc ||
+        e->guest_pc == ((uint32_t)pc | BLOCK_REFUSED_BIT)) {
         dbt->cache_hits++;
         return e;
     }
@@ -26,7 +27,7 @@ z80_block_entry_t *dbt_cache_lookup(z80_dbt_t *dbt, uint16_t pc) {
 
 void dbt_cache_insert(z80_dbt_t *dbt, uint16_t pc, uint8_t *code) {
     z80_block_entry_t *e = &dbt->cache[cache_index(pc)];
-    e->guest_pc    = (uint32_t)pc;
+    e->guest_pc    = code ? (uint32_t)pc : ((uint32_t)pc | BLOCK_REFUSED_BIT);
     e->native_code = code;
 }
 

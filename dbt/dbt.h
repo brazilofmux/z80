@@ -52,6 +52,11 @@ _Static_assert(sizeof(z80_block_entry_t) == 16, "z80_block_entry_t must be 16 by
 #define BLOCK_CACHE_SIZE   (64 * 1024)
 #define BLOCK_CACHE_MASK   (BLOCK_CACHE_SIZE - 1)
 #define BLOCK_EMPTY_PC     0xFFFFFFFFu
+/* "Known untranslatable PC" sentinel: guest_pc = pc | REFUSED bit,
+ * native_code = NULL. The tag bit keeps the JIT-side inline chaining
+ * probe (which compares the raw 16-bit pc) from matching and BRing to
+ * NULL; only the C-side dbt_cache_lookup decodes it. */
+#define BLOCK_REFUSED_BIT  0x40000000u
 
 /* Upper bound on guest instructions per translated block. The backend
  * stops emitting earlier when it hits any control-flow or untranslatable

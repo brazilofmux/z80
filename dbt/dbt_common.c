@@ -172,14 +172,17 @@ int dbt_run(z80_dbt_t *dbt) {
         z80_block_entry_t *be = dbt_cache_lookup(dbt, cpu->pc);
         uint8_t *code = be ? be->native_code : NULL;
 
-        if (!code) {
+        if (!be) {
             dbt_jit_writable_begin();
             code = dbt_translate_block(dbt, cpu->pc);
             dbt_jit_writable_end();
-            if (code) {
-                dbt_cache_insert(dbt, cpu->pc, code);
-                dbt->blocks_translated++;
-            }
+            /* Insert even on refusal (code == NULL): the sentinel makes
+             * the next visit to this untranslatable PC skip the translate
+             * attempt AND the W^X toggle entirely. Interp-stepping a
+             * sentinel PC is always correct no matter what the bytes
+             * decode to, so SMC can't invalidate it into wrongness. */
+            dbt_cache_insert(dbt, cpu->pc, code);
+            if (code) dbt->blocks_translated++;
         }
 
         if (code) {
