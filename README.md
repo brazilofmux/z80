@@ -43,7 +43,7 @@ The correctness story is as unreasonable as the performance story:
 - `cpm/` — BDOS/BIOS shims, `.COM` loader, host-directory-as-drive-A: mapping
 - `kaypro/` — machine personality (early stub; terminal video/keyboard to come)
 - `tests/`, `tools/`, `bench/` — generated test programs and the COBOL benchmark harness
-- `disks/` — CP/M software used for testing (zexdoc/zexall, Zork 1, MS COBOL)
+- `disks/` — CP/M software used for testing. The freely redistributable zexdoc/zexall exercisers are included; commercial software we test with (Zork 1, MS COBOL 4.65) is git-ignored — drop your own copies into `disks/zork1/` and `disks/mscobol/` to reproduce those results
 
 ## Building & Running
 
@@ -51,10 +51,11 @@ Requires an AArch64 host for the JIT (developed on Apple Silicon macOS; the x86-
 
 ```bash
 make
-./z80-monster -j -s disks/zork1/ZORK1.COM     # JIT + stats
+./z80-monster -j -s disks/zex/zexdoc.com      # JIT + stats (67 tests, ~3s)
 ./z80-monster -i prog.com                     # reference interpreter
 ./z80-monster -V prog.com                     # JIT with lockstep shadow verify
 make bench                                    # SQUARO benchmark, jit vs interp
+                                              # (needs MS COBOL in disks/mscobol/)
 ```
 
 The directory containing the `.COM` file becomes drive A:. Console I/O is raw termios with buffered output.
