@@ -370,8 +370,16 @@ static void ldir_lddr_common(z80_cpu_t *cpu, int incr) {
     uint32_t total = (uint32_t)bc + window;
     for (uint32_t k = 0; k < total; k++) {
         uint16_t p = (uint16_t)(dst_lo + k - window + 1);
-        dbt->cache[p & BLOCK_CACHE_MASK].guest_pc    = BLOCK_EMPTY_PC;
-        dbt->cache[p & BLOCK_CACHE_MASK].native_code = NULL;
+        z80_block_entry_t *e = &dbt->cache[p & BLOCK_CACHE_MASK];
+        if (e->guest_pc == BLOCK_EMPTY_PC) continue;
+        /* Distance from block start p up to the first written byte;
+         * zero once p is inside the written range. The block covers a
+         * written byte iff its span reaches past that gap (1:1 direct
+         * mapping — see dbt_invalidate_for_store). */
+        uint32_t gap = (window - 1 > k) ? (window - 1 - k) : 0;
+        if (gap >= e->span) continue;
+        e->guest_pc    = BLOCK_EMPTY_PC;
+        e->native_code = NULL;
         dbt_links_repatch(dbt, p, NULL);   /* see dbt_invalidate_for_store */
     }
     dbt->smc_invalidations++;

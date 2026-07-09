@@ -28,6 +28,10 @@ z80_block_entry_t *dbt_cache_lookup(z80_dbt_t *dbt, uint16_t pc) {
 void dbt_cache_insert(z80_dbt_t *dbt, uint16_t pc, uint8_t *code) {
     z80_block_entry_t *e = &dbt->cache[cache_index(pc)];
     e->guest_pc    = code ? (uint32_t)pc : ((uint32_t)pc | BLOCK_REFUSED_BIT);
+    /* Refusal is decided from the bytes at pc, but we don't track how
+     * many the decoder looked at — treat the sentinel as covering any
+     * store that lands in the window so it's always retried. */
+    e->span        = code ? dbt->last_block_bytes : 0xFFFFFFFFu;
     e->native_code = code;
     /* Point every block that direct-links to this PC at the fresh
      * translation (or back to the probe, for a refused sentinel). */
@@ -101,6 +105,7 @@ void dbt_links_repatch(z80_dbt_t *dbt, uint16_t pc, uint8_t *code) {
 void dbt_mark_block_bytes(z80_dbt_t *dbt, uint16_t start, uint32_t end) {
     uint32_t bytes = (end - start) & 0xFFFF;
     if (bytes > dbt->max_block_bytes) dbt->max_block_bytes = bytes;
+    dbt->last_block_bytes = bytes;
     for (uint32_t a = start; a < end; a++) {
         dbt->code_bitmap[a & 0xFFFF] = 1;
     }
@@ -124,8 +129,15 @@ static void dbt_invalidate_for_store(z80_dbt_t *dbt, uint16_t addr) {
     uint32_t window = dbt->max_block_bytes;
     for (uint32_t k = 0; k < window; k++) {
         uint16_t p = (uint16_t)(addr - k);
-        dbt->cache[p & BLOCK_CACHE_MASK].guest_pc    = BLOCK_EMPTY_PC;
-        dbt->cache[p & BLOCK_CACHE_MASK].native_code = NULL;
+        z80_block_entry_t *e = &dbt->cache[p & BLOCK_CACHE_MASK];
+        /* The cache is direct-mapped 1:1 (64K entries, 16-bit PC), so
+         * this slot can only hold the block starting at p. Its span
+         * tells us exactly whether that block covers byte `addr`
+         * (addr = p + k, covered iff k < span) — skip the clear and the
+         * unlink storm for the blocks that merely start nearby. */
+        if (e->guest_pc == BLOCK_EMPTY_PC || k >= e->span) continue;
+        e->guest_pc    = BLOCK_EMPTY_PC;
+        e->native_code = NULL;
         /* Any block direct-linked to p would bypass the cleared cache
          * entry and run the stale translation — unlink synchronously.
          * (This can run mid-JIT via z80_jit_post_store; we're in C code

@@ -52,7 +52,10 @@ static inline void dbt_jit_writable_end(void)   { }
  * empty slot encoded by guest_pc == 0xFFFFFFFFu (no legal Z80 PC matches). */
 typedef struct {
     uint32_t guest_pc;
-    uint32_t _pad;
+    uint32_t span;       /* guest bytes this block covers: [pc, pc+span).
+                          * 0xFFFFFFFF for refused sentinels ("always in
+                          * range"). Read only by the C-side SMC sweeps;
+                          * the JIT probe's LDP ignores it (32-bit cmp). */
     uint8_t *native_code;
 } z80_block_entry_t;
 
@@ -165,6 +168,12 @@ typedef struct {
      * whose start is in [A - max_block_bytes + 1, A]. Initially 0; updated
      * monotonically by dbt_mark_block_bytes(). Reset on full cache wipe. */
     uint32_t max_block_bytes;
+
+    /* Byte-length of the block most recently finished by
+     * dbt_translate_block (via dbt_mark_block_bytes). Consumed by the
+     * dbt_cache_insert that immediately follows translation, which stamps
+     * it into the entry's span field. */
+    uint32_t last_block_bytes;
 
     int trace;
     int verify;          /* -V: run a parallel interp shadow and diff each block */
