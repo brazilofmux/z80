@@ -12,6 +12,8 @@
  *   X22 = saved LR              (BLR to flag helpers clobbers X30)
  *   X23 = code_bitmap base      (inlined SMC fast-path check on stores)
  *   X24 = z80_f_tables base     (result-indexed flag bytes, dbt_flags.h)
+ *   X25 = pending insn count    (accumulated per block, flushed into
+ *                                cpu->insn_count on chain exit)
  *   X9 / X10 / X11 / X12 = scratch
  *
  * Block ABI: block updates cpu->pc and cpu->insn_count, then RETs back
@@ -42,15 +44,17 @@ int dbt_jit_available(void) { return 1; }
 void dbt_emit_trampoline(z80_dbt_t *dbt) {
     emit_t e = { .buf = dbt->code_buf, .offset = 0, .capacity = CODE_BUF_SIZE };
 
-    /* Frame: 64 bytes (16-byte aligned).
+    /* Frame: 80 bytes (16-byte aligned).
      *   [SP+ 0] FP, LR
      *   [SP+16] X19, X20
      *   [SP+32] X21, X22
-     *   [SP+48] X23, X24       (X24 = flag-table base) */
-    emit_stp_pre_sp (&e, A64_W29, A64_W30, -64);
+     *   [SP+48] X23, X24       (X24 = flag-table base)
+     *   [SP+64] X25, X26       (X25 = insn-count accumulator; X26 pad) */
+    emit_stp_pre_sp (&e, A64_W29, A64_W30, -80);
     emit_stp_x64_off(&e, A64_W19, A64_W20, A64_SP, 16);
     emit_stp_x64_off(&e, A64_W21, A64_W22, A64_SP, 32);
     emit_stp_x64_off(&e, A64_W23, A64_W24, A64_SP, 48);
+    emit_stp_x64_off(&e, A64_W25, A64_W26, A64_SP, 64);
 
     /* Bind host register convention. */
     emit_mov_x64_x64(&e, A64_W19, A64_W0);   /* X19 = cpu  */
@@ -58,15 +62,17 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
     emit_mov_x64_x64(&e, A64_W21, A64_W3);   /* X21 = cache base */
     emit_mov_x64_x64(&e, A64_W23, A64_W4);   /* X23 = code_bitmap base */
     emit_mov_x64_x64(&e, A64_W24, A64_W5);   /* X24 = z80_f_tables base */
+    emit_movz_x64(&e, A64_W25, 0, 0);        /* X25 = pending insn count */
 
     /* BLR into the block (pointer in X2). The block's RET returns here. */
     emit_blr(&e, A64_W2);
 
     /* Unwind. */
+    emit_ldp_x64_off(&e, A64_W25, A64_W26, A64_SP, 64);
     emit_ldp_x64_off(&e, A64_W23, A64_W24, A64_SP, 48);
     emit_ldp_x64_off(&e, A64_W21, A64_W22, A64_SP, 32);
     emit_ldp_x64_off(&e, A64_W19, A64_W20, A64_SP, 16);
-    emit_ldp_post_sp(&e, A64_W29, A64_W30, 64);
+    emit_ldp_post_sp(&e, A64_W29, A64_W30, 80);
     emit_ret(&e);
 
     dbt->code_used = e.offset;
@@ -292,13 +298,16 @@ static a64_cond_t host_cond_for_cc(int cc) {
     return (cc & 1) ? A64_COND_NE : A64_COND_EQ;
 }
 
-/* Emit "TST F, #mask" via a scratch register, sets host flags so the
- * caller can immediately follow with CSEL Wd, Wtaken, Wfall, host_cond.
- * Uses W12 as the mask scratch. */
+/* Emit "TST F, #mask", setting host flags so the caller can immediately
+ * follow with CSEL Wd, Wtaken, Wfall, host_cond. All four cc flag masks
+ * are single bits and encode as logical immediates; the MOVZ+TST-reg
+ * fallback covers any future multi-bit mask that doesn't. */
 static void emit_test_z80_flag(emit_t *e, uint8_t mask) {
     emit_ldrb_imm(e, A64_W10, A64_W19, OFF_F);
-    emit_movz_w32(e, A64_W12, mask, 0);
-    emit_tst_w32(e, A64_W10, A64_W12);
+    if (!emit_tst_w32_imm(e, A64_W10, mask)) {
+        emit_movz_w32(e, A64_W12, mask, 0);
+        emit_tst_w32(e, A64_W10, A64_W12);
+    }
 }
 
 /* Per-block prologue. The trampoline BLRs in with X30 (LR) pointing at
@@ -339,9 +348,10 @@ static void emit_block_tail(emit_t *e, uint32_t insn_count_delta, int q_mode) {
         emit_strb_imm(e, A64_W9, A64_W19, OFF_Q);
     }
 
-    emit_ldr_x64_imm(e, A64_W9, A64_W19, OFF_INSN_COUNT);
-    emit_add_x64_imm(e, A64_W9, A64_W9, insn_count_delta);
-    emit_str_x64_imm(e, A64_W9, A64_W19, OFF_INSN_COUNT);
+    /* Accumulate the block's insn count in X25; it is flushed into
+     * cpu->insn_count only on the chain-exit path below. Chained blocks
+     * pay 1 host insn here instead of a load/add/store round trip. */
+    emit_add_x64_imm(e, A64_W25, A64_W25, insn_count_delta);
 
     emit_mov_x64_x64(e, A64_W30, A64_W22);
 
@@ -368,7 +378,14 @@ static void emit_block_tail(emit_t *e, uint32_t insn_count_delta, int q_mode) {
     emit_ldr_x64_reg_uxtw(e, A64_W16, A64_W21, A64_W13);
     emit_br(e, A64_W16);
 
+    /* Chain exit (probe miss): flush the pending insn count into
+     * cpu->insn_count before returning to the trampoline — dbt_run's
+     * termination/verify logic reads it there. X25 itself is re-zeroed
+     * on the next trampoline entry. */
     emit_patch_cond19(e, patch_miss, emit_pos(e));
+    emit_ldr_x64_imm(e, A64_W9, A64_W19, OFF_INSN_COUNT);
+    emit_add_x64(e, A64_W9, A64_W9, A64_W25);
+    emit_str_x64_imm(e, A64_W9, A64_W19, OFF_INSN_COUNT);
     emit_ret(e);
 }
 

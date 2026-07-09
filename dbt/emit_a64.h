@@ -533,6 +533,13 @@ static inline void emit_add_x64_imm(emit_t *e, a64_reg_t rd, a64_reg_t rn, uint3
     emit_inst(e, inst);
 }
 
+/* ADD Xd, Xn, Xm */
+static inline void emit_add_x64(emit_t *e, a64_reg_t rd, a64_reg_t rn, a64_reg_t rm) {
+    uint32_t inst = 0x8B000000u | ((uint32_t)(rm & 0x1F) << 16)
+                  | ((uint32_t)(rn & 0x1F) << 5) | (rd & 0x1F);
+    emit_inst(e, inst);
+}
+
 /* SUB Xd, Xn, Xm */
 static inline void emit_sub_x64(emit_t *e, a64_reg_t rd, a64_reg_t rn, a64_reg_t rm) {
     uint32_t inst = 0xCB000000u | ((uint32_t)(rm & 0x1F) << 16)
@@ -602,6 +609,16 @@ static inline void emit_tst_w32(emit_t *e, a64_reg_t rn, a64_reg_t rm) {
     /* ANDS WZR, Wn, Wm */
     uint32_t inst = 0x6A00001Fu | ((uint32_t)(rm & 0x1F) << 16) | ((uint32_t)(rn & 0x1F) << 5);
     emit_inst(e, inst);
+}
+
+/* TST Wn, #imm — ANDS with WZR destination. Returns false if imm is not
+ * a valid logical immediate (caller falls back to MOVZ+TST reg). */
+static inline bool emit_tst_w32_imm(emit_t *e, a64_reg_t rn, uint32_t imm) {
+    uint32_t enc;
+    if (!a64_encode_logical_imm32(imm, &enc)) return false;
+    uint32_t inst = 0x72000000u | (enc << 10) | ((uint32_t)(rn & 0x1F) << 5) | 0x1F;
+    emit_inst(e, inst);
+    return true;
 }
 
 /* CSEL Wd, Wn, Wm, cond — 32-bit conditional select. cond uses the
