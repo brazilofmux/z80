@@ -132,6 +132,17 @@ int main(int argc, char **argv) {
         }
         /* Clear a_root — we rely on CWD now. Prevents double-prefixing in make_host_path. */
         cpm_set_a_root(NULL);
+
+        /* The CWD is now the program's own directory, so load it by
+         * basename — the original path no longer resolves from here and
+         * relative invocations like `z80-monster disks/zex/zexdoc.com`
+         * used to fail on the fopen. (With an explicit -d root the
+         * program path is left alone; it may be absolute or relative to
+         * that root.) */
+        if (prog && !disk_root) {
+            char *last_slash = strrchr((char *)prog, '/');
+            if (last_slash) prog = last_slash + 1;
+        }
     }
 
     /* If no explicit program was given but we have a disk root, try to find one */
