@@ -13,7 +13,7 @@ All numbers from an M-series MacBook, single core:
 | Workload | Rate |
 |----------|------|
 | MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** |
-| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~2.0 BIPS** |
+| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** |
 | Same workloads, reference interpreter | ~230 MIPS |
 
 The JIT's interpreter-fallback rate on real workloads is ~0.02% — essentially everything runs as translated native code. Real software runs today: Zork 1, MS COBOL (the compiler *and* its output), and the zexdoc/zexall instruction exercisers pass 67/67 with correct CRCs.
@@ -26,7 +26,7 @@ This is a **dynamic binary translator** (DBT) first, interpreter second. The int
 - **Direct block linking.** Every statically-known control-flow edge — fall-through, `JP`, `JR`, `CALL`, and both arms of every conditional — is a patchable branch aimed directly at the target block's native code. A hot loop's back-edge is literally `TST; B.cond; B` into the next translation. Blocks never return to the dispatcher until they must.
 - **Superblocks.** Conditional branches don't end translation: the taken arm becomes an out-of-line side exit and the translator keeps going through the fall-through, so straight-line runs cross `JR cc` / `DJNZ` / `RET cc` without paying a block boundary. Length is capped in guest bytes because block span is also the self-modifying-code invalidation window — everything is a trade.
 - **Dead-flag elimination.** The Z80 sets flags on nearly every instruction; almost nobody looks at them. A backward liveness pass over each block computes, per instruction and per flag bit, which bits can actually be observed — and the emitters skip the rest. `ADD` before another `ADD` emits no flag code at all; `ADD` before `JR C` emits just the carry. What survives is assembled inline from result-indexed lookup tables plus a few identities (carry-recovery for H, sign-xor for V) — no helper calls, no runtime lazy-flag descriptors, all decided at translation time.
-- **Self-modifying-code tracking that doesn't give up.** A per-byte code bitmap makes every guest store check whether it just clobbered translated code (one ADD+LDRB+CBZ on the fast path). zexdoc patches its test instruction millions of times and re-runs it; the invalidation, unlink, and retranslation machinery survives the full run in lockstep with the interpreter.
+- **Self-modifying-code tracking that doesn't give up.** A per-byte code bitmap makes every guest store check whether it just clobbered translated code (one ADD+LDRB+CBZ on the fast path). And because the block cache maps guest PCs 1:1, each entry records its block's exact byte span, so an invalidating store kills only the blocks that truly cover the written byte — zexdoc patches its test instruction 7.4 million times and re-runs it, and the invalidation, unlink, and retranslation machinery survives the full run in lockstep with the interpreter.
 - **Block-op intrinsics.** LDIR/LDDR run as host-speed copies with the documented overlap semantics and a batched SMC sweep.
 
 ### Verification
@@ -52,7 +52,7 @@ Requires an AArch64 host for the JIT (developed on Apple Silicon macOS; the x86-
 
 ```bash
 make
-./z80-monster -j -s disks/zex/zexdoc.com      # JIT + stats (67 tests, ~3s)
+./z80-monster -j -s disks/zex/zexdoc.com      # JIT + stats (67 tests, ~2s)
 ./z80-monster -i prog.com                     # reference interpreter
 ./z80-monster -V prog.com                     # JIT with lockstep shadow verify
 make bench                                    # SQUARO benchmark, jit vs interp
@@ -65,7 +65,7 @@ The directory containing the `.COM` file becomes drive A:. Console I/O is raw te
 
 Working today: the full documented + useful-undocumented instruction set split between translator and interpreter fallback, CP/M 2.2 BDOS/BIOS shims sufficient for real applications, SMC, and the verification machinery. Not yet: Kaypro terminal emulation, interrupts, banked memory (CP/M 3), cycle counting (we lie cheerfully).
 
-The general-purpose levers are mostly pulled. What remains is smaller and more surgical: memptr dead-store elision, inline LDIR fast paths, per-entry SMC windows (which would let superblocks grow past their current cap), and eventually per-application specialization — recognizing WordStar's screen loop or dBASE's B-tree walk and cheating accordingly, which was always the endgame the design docs promised. (A hardware-paired return-address stack for `RET` was built, measured a consistent loss — Apple Silicon's indirect-branch predictor already nails the inline cache probe — and reverted; the design notes live in `dbt/dbt_a64.c` so nobody builds it twice.) The target is still a status line that says **10 BIPS** while WordStar search-and-replaces a 50-page document before the keyboard interrupt returns; the road there is now paved with special cases, and we are at peace with that.
+The general-purpose levers are now *all* pulled. Memptr dead-store elision and per-entry SMC windows landed (the latter took zexdoc from 2.0 to 3.3 BIPS and cut the full lockstep-verify run from four minutes to 46 seconds); the ones that didn't survive measurement are documented at the scene so nobody builds them twice — a hardware-paired return-address stack for `RET` (consistent loss; Apple Silicon's indirect-branch predictor already nails the inline cache probe), sinking the per-exit q/count bookkeeping across chained edges (2–3% ceiling, and it costs the lockstep-verify invariant), longer superblocks (the cap barely binds; blocks end at natural control flow first), and inline LDIR fast paths (our current workloads execute almost no LDIRs — that one waits for WordStar). What remains is the endgame the design docs promised from day one: per-application specialization — recognizing WordStar's screen loop or dBASE's B-tree walk and cheating accordingly. The target is still a status line that says **10 BIPS** while WordStar search-and-replaces a 50-page document before the keyboard interrupt returns; the road there is now paved with special cases, and we are at peace with that.
 
 See [CLAUDE.md](CLAUDE.md) for the full architecture notes and development history.
 
