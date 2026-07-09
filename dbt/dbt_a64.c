@@ -414,23 +414,22 @@ static void emit_tail_prologue(emit_t *e, uint32_t insn_count_delta, int q_mode)
  * the fallback behind every unlinked static edge.
  *
  * Entry contract: W0 holds the next guest PC (0..0xFFFF).
- *   W13 = pc * 16 + 0x20000   (cache entry offset in the aux block)
- *   W15 = cache[idx].guest_pc (32-bit field at +0)
+ *   X13 = aux + pc * 16 + 0x20000    (cache entry address)
+ *   X15, X16 = LDP entry             (guest_pc+pad, native_code)
  *   if W15 != W0 → B exit stub
- *   X16 = cache[idx].native_code (8-byte field at +8)
  *   BR X16
- * The cache index is exactly `pc` since BLOCK_CACHE_MASK == 0xFFFF. */
+ * One LDP fetches the whole 16-byte entry — the pad bytes ride in
+ * X15's high half, which the 32-bit compare ignores. The cache index
+ * is exactly `pc` since BLOCK_CACHE_MASK == 0xFFFF. */
 static void emit_dynamic_tail(emit_t *e, uint32_t exit_stub_off) {
     emit_lsl_w32_imm(e, A64_W13, A64_W0, 4);
     emit_add_w32_imm_lsl12(e, A64_W13, A64_W13, AUX_CACHE_SEG);
-    emit_ldr_w32_reg_uxtw(e, A64_W15, R_AUX, A64_W13);
+    emit_add_x64_w32_uxtw(e, A64_W13, R_AUX, A64_W13);
+    emit_ldp_x64_off(e, A64_W15, A64_W16, A64_W13, 0);
     emit_cmp_w32_w32(e, A64_W15, A64_W0);
 
     uint32_t patch_miss = emit_pos(e);
     emit_b_cond(e, A64_COND_NE, 0);
-
-    emit_add_w32_imm(e, A64_W13, A64_W13, 8);
-    emit_ldr_x64_reg_uxtw(e, A64_W16, R_AUX, A64_W13);
     emit_br(e, A64_W16);
 
     /* Chain exit (probe miss): the stub spills pinned state + W0 and
@@ -465,6 +464,16 @@ static void emit_edge(z80_dbt_t *dbt, emit_t *e, uint16_t pc) {
         emit_b(e, 4);   /* fall through to the probe below */
     emit_dynamic_tail(e, dbt->exit_stub_off);
 }
+
+/* NOTE on a road not taken: a shadow return-address stack (guest CALL
+ * does a host BL + pushes {guest_ret_pc, landing_pad} on the host
+ * stack; guest RET validates and host-RETs, riding the hardware return
+ * predictor) was built and benchmarked here — and measured a consistent
+ * 3-6% LOSS on both SQUARO and zexdoc. Apple Silicon's indirect-branch
+ * predictor already handles the probe's per-site BR essentially
+ * perfectly, so the prediction win never materializes while the
+ * CALL-side push (~6 insns) is paid every time. The LDP single-load
+ * probe below is the useful thing that analysis left behind. */
 
 /* Rewrite the patchable B at site_off (see emit_edge). target == NULL
  * re-aims it at its own fallback probe (site + 4). Caller holds the

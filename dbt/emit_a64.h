@@ -850,6 +850,60 @@ static inline void emit_ret(emit_t *e) {
     emit_inst(e, 0xD65F03C0u);
 }
 
+/* RET Xn — return through an arbitrary register. Same hardware return-
+ * stack prediction as RET X30: any BL/BLR pushes the predictor, any RET
+ * pops it, regardless of which register carries the target. */
+static inline void emit_ret_reg(emit_t *e, a64_reg_t rn) {
+    uint32_t inst = 0xD65F0000u | ((uint32_t)(rn & 0x1F) << 5);
+    emit_inst(e, inst);
+}
+
+/* BL PC-relative, ±128 MB. byte_offset==0 is a placeholder for
+ * emit_patch_bl26. */
+static inline void emit_bl(emit_t *e, int32_t byte_offset) {
+    int32_t imm26 = byte_offset >> 2;
+    assert(imm26 >= -(1 << 25) && imm26 < (1 << 25));
+    uint32_t inst = 0x94000000u | ((uint32_t)imm26 & 0x03FFFFFFu);
+    emit_inst(e, inst);
+}
+
+/* Patch a BL at patch_offset to land on target_offset (same imm26 field
+ * as B, different opcode — emit_patch_b26 would silently turn it into a
+ * plain B and lose the hardware return-stack push). */
+static inline void emit_patch_bl26(emit_t *e, uint32_t patch_offset, uint32_t target_offset) {
+    int32_t disp = (int32_t)(target_offset - patch_offset);
+    int32_t imm26 = disp >> 2;
+    assert(imm26 >= -(1 << 25) && imm26 < (1 << 25));
+    uint32_t inst = 0x94000000u | ((uint32_t)imm26 & 0x03FFFFFFu);
+    uint8_t *p = e->buf + patch_offset;
+    p[0] = (uint8_t)(inst >>  0);
+    p[1] = (uint8_t)(inst >>  8);
+    p[2] = (uint8_t)(inst >> 16);
+    p[3] = (uint8_t)(inst >> 24);
+}
+
+/* CMP SP, Xm — SUBS XZR, SP, Xm, UXTX. The extended-register form is the
+ * only ADDS/SUBS encoding that accepts SP as Rn. */
+static inline void emit_cmp_sp_x64(emit_t *e, a64_reg_t rm) {
+    uint32_t inst = 0xEB200000u | ((uint32_t)(rm & 0x1F) << 16)
+                  | (3u << 13) | (31u << 5) | 31u;
+    emit_inst(e, inst);
+}
+
+/* CMP Xn, #imm12, LSL #12 */
+static inline void emit_cmp_x64_imm_lsl12(emit_t *e, a64_reg_t rn, uint32_t imm12) {
+    uint32_t inst = 0xF140001Fu | ((imm12 & 0xFFFu) << 10)
+                  | ((uint32_t)(rn & 0x1F) << 5);
+    emit_inst(e, inst);
+}
+
+/* SUB Xd, Xn, #imm12, LSL #12 */
+static inline void emit_sub_x64_imm_lsl12(emit_t *e, a64_reg_t rd, a64_reg_t rn, uint32_t imm12) {
+    uint32_t inst = 0xD1400000u | ((imm12 & 0xFFFu) << 10)
+                  | ((uint32_t)(rn & 0x1F) << 5) | (rd & 0x1F);
+    emit_inst(e, inst);
+}
+
 /* ---- Stack: STP/LDP with arbitrary base register (64-bit) ---- */
 
 static inline void emit_stp_x64_pre(emit_t *e, a64_reg_t rt1, a64_reg_t rt2, a64_reg_t rn, int imm) {
