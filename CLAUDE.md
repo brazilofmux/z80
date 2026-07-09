@@ -58,10 +58,13 @@ typedef struct {
 } z80_ctx_t;
 ```
 
-**Register caching strategy** (the key to BIPS):
-- On x86-64: map the 4 main 16-bit pairs + IX/IY/SP into host GPRs (we have 16, it's doable).
-- On AArch64: even more GPRs available (X19–X28 callee-saved).
-- The accumulator + flags (A+F) is the hottest; keep it in a single host register when possible and materialize F only on demand.
+**Register caching strategy** (the key to BIPS — SHIPPED on AArch64):
+- BC/DE/HL/SP/A/F are pinned in callee-saved host registers
+  (X21/X22/X23/X26/X27/X28) across blocks AND block chains; X24 holds a
+  single aux base serving flag tables, the SMC bitmap, and the block
+  cache at fixed offsets. See the convention comment atop `dbt/dbt_a64.c`.
+- IX/IY/memptr/q stay context-resident (cooler paths).
+- On x86-64 (future): fewer GPRs, the pairs will need triage.
 
 ## The Eternal War: Flags
 
@@ -71,14 +74,22 @@ Z80 flags (F register): `S Z 5 H 3 P/V N C`
 - Many conditional jumps/branches only read a subset.
 - Some programs (copy protection, self-modifying code, "undocumented" tricks) rely on bits 3 and 5 (the "XY" flags).
 
-**Lazy flags plan** (critical for 10 BIPS):
-- In translated code, most ALU ops only set a "flag descriptor" (what operation was performed + the two operands or result).
-- Only when a `PUSH AF`, `LD A,F`, conditional branch that needs a specific flag, or `DAA` is reached do we materialize the real F byte.
-- This is the single biggest lever for performance on Z80 DBT.
-
-We will steal ideas from:
-- The "lazy flags" in various x86 emulators (Bochs, QEMU TCG, etc.)
-- The SLOW-32 experience with complex side effects
+**What shipped instead of runtime lazy flags: STATIC dead-flag elimination.**
+Runtime flag descriptors (Bochs/QEMU-style) were the original plan, but the
+translator got the same payoff with zero runtime bookkeeping: translation is
+two-phase (decode the whole block, then emit), and a backward per-bit
+liveness pass over F tells every op exactly which flag bits can ever be
+observed (conditional branches, ADC-style carry inputs, helpers, PUSH AF,
+block exits). The emitters skip the dead chunks — ADD before ADD emits no
+flag code at all; ADD before JR C emits only the carry. What survives is
+built inline from result-indexed tables (`z80_f_tables`) plus identities
+(carry-recovery for H, sign-xor for V). Two rules that keep it sound:
+- fmask is the LIVE-OUT mask, not live∩write — pass-through ops (INC
+  preserves C, rotates preserve S/Z/PV) must see live bits outside their
+  own write set;
+- q/prev_q semantics stay ARCHITECTURAL even for fully-elided ops, and
+  SCF/CCF classify as read-all so their XY-quirk inputs always materialize.
+Block exits mark all bits live, so `-V` lockstep verification stays exact.
 
 ## Block Chaining & Control Flow
 

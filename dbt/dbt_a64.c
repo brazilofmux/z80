@@ -528,45 +528,57 @@ enum {
     ALU_ADD, ALU_ADC, ALU_SUB, ALU_SBC, ALU_AND, ALU_OR, ALU_XOR, ALU_CP
 };
 
-static void emit_alu_inline(emit_t *e, int op) {
+static void emit_alu_inline(emit_t *e, int op, uint8_t fmask) {
     if (op == ALU_AND || op == ALU_OR || op == ALU_XOR) {
         if (op == ALU_AND)      emit_and_w32(e, R_A, R_A, A64_W1);
         else if (op == ALU_OR)  emit_orr_w32(e, R_A, R_A, A64_W1);
         else                    emit_eor_w32(e, R_A, R_A, A64_W1);
-        emit_ldrb_reg_uxtw(e, R_F, R_AUX, R_A);   /* FT_LOGIC == +0 */
-        if (op == ALU_AND)
-            (void)emit_orr_w32_imm(e, R_F, R_F, Z80_FLAG_H);
+        if (fmask) {
+            emit_ldrb_reg_uxtw(e, R_F, R_AUX, R_A);   /* FT_LOGIC == +0 */
+            if (op == ALU_AND && (fmask & Z80_FLAG_H))
+                (void)emit_orr_w32_imm(e, R_F, R_F, Z80_FLAG_H);
+        }
         return;
     }
 
     int is_sub = (op == ALU_SUB || op == ALU_SBC || op == ALU_CP);
 
-    emit_mov_w32_w32(e, A64_W9, R_A);                      /* W9 = old a */
+    /* CP is flag-only: fully dead means nothing to do at all. */
+    if (op == ALU_CP && !fmask) return;
+
+    /* Old A is only consumed by the H and V identities. */
+    if (fmask & (Z80_FLAG_H | Z80_FLAG_PV))
+        emit_mov_w32_w32(e, A64_W9, R_A);              /* W9 = old a */
 
     /* W13 = wide result (carry/borrow lives at bit 8). Carry-in is
      * extracted from R_F BEFORE R_F is overwritten below. */
     if (op == ALU_ADC || op == ALU_SBC) {
         (void)emit_and_w32_imm(e, A64_W11, R_F, Z80_FLAG_C);
         if (is_sub) {
-            emit_sub_w32(e, A64_W13, A64_W9, A64_W1);
+            emit_sub_w32(e, A64_W13, R_A, A64_W1);
             emit_sub_w32(e, A64_W13, A64_W13, A64_W11);
         } else {
-            emit_add_w32(e, A64_W13, A64_W9, A64_W1);
+            emit_add_w32(e, A64_W13, R_A, A64_W1);
             emit_add_w32(e, A64_W13, A64_W13, A64_W11);
         }
     } else if (is_sub) {
-        emit_sub_w32(e, A64_W13, A64_W9, A64_W1);
+        emit_sub_w32(e, A64_W13, R_A, A64_W1);
     } else {
-        emit_add_w32(e, A64_W13, A64_W9, A64_W1);
+        emit_add_w32(e, A64_W13, R_A, A64_W1);
     }
     (void)emit_and_w32_imm(e, A64_W14, A64_W13, 0xFF);     /* W14 = res8 */
     if (op != ALU_CP)
         emit_mov_w32_w32(e, R_A, A64_W14);
 
-    /* F skeleton: S|Z|XY from the result byte. */
+    if (!fmask) return;
+
+    /* F skeleton: S|Z|XY from the result byte; zeroes every other bit,
+     * so the guarded ORR chunks below can assume a clean base. Dead
+     * bits the chunks skip simply keep the table's zeros — fine, dead
+     * means any value is acceptable. */
     emit_add_w32_imm(e, A64_W12, A64_W14, FT_SZXY);
     emit_ldrb_reg_uxtw(e, R_F, R_AUX, A64_W12);
-    if (op == ALU_CP) {
+    if (op == ALU_CP && (fmask & (Z80_FLAG_5 | Z80_FLAG_3))) {
         /* CP quirk: XY comes from the OPERAND, not the result. */
         emit_movz_w32(e, A64_W12, 0xFF & ~(Z80_FLAG_5 | Z80_FLAG_3), 0);
         emit_and_w32(e, R_F, R_F, A64_W12);
@@ -575,28 +587,34 @@ static void emit_alu_inline(emit_t *e, int op) {
         emit_orr_w32(e, R_F, R_F, A64_W12);
     }
 
-    /* H: bit 4 of (a ^ b ^ wide_res). */
-    emit_eor_w32(e, A64_W12, A64_W9, A64_W1);
-    emit_eor_w32(e, A64_W12, A64_W12, A64_W13);
-    (void)emit_and_w32_imm(e, A64_W12, A64_W12, Z80_FLAG_H);
-    emit_orr_w32(e, R_F, R_F, A64_W12);
+    if (fmask & Z80_FLAG_H) {
+        /* H: bit 4 of (a ^ b ^ wide_res). */
+        emit_eor_w32(e, A64_W12, A64_W9, A64_W1);
+        emit_eor_w32(e, A64_W12, A64_W12, A64_W13);
+        (void)emit_and_w32_imm(e, A64_W12, A64_W12, Z80_FLAG_H);
+        emit_orr_w32(e, R_F, R_F, A64_W12);
+    }
 
-    /* C: bit 8 of the wide result (borrow sign-extends, so mask). */
-    emit_lsr_w32_imm(e, A64_W12, A64_W13, 8);
-    (void)emit_and_w32_imm(e, A64_W12, A64_W12, 1);
-    emit_orr_w32(e, R_F, R_F, A64_W12);
+    if (fmask & Z80_FLAG_C) {
+        /* C: bit 8 of the wide result (borrow sign-extends, so mask). */
+        emit_lsr_w32_imm(e, A64_W12, A64_W13, 8);
+        (void)emit_and_w32_imm(e, A64_W12, A64_W12, 1);
+        emit_orr_w32(e, R_F, R_F, A64_W12);
+    }
 
-    /* V -> PV (bit 2): add: (~(a^b) & (a^res)).7 ; sub: ((a^b) & (a^res)).7 */
-    emit_eor_w32(e, A64_W12, A64_W9, A64_W1);
-    if (!is_sub)
-        emit_mvn_w32(e, A64_W12, A64_W12);   /* high garbage ANDed away below */
-    emit_eor_w32(e, A64_W15, A64_W9, A64_W14);
-    emit_and_w32(e, A64_W12, A64_W12, A64_W15);
-    emit_lsr_w32_imm(e, A64_W12, A64_W12, 7);
-    emit_lsl_w32_imm(e, A64_W12, A64_W12, 2);
-    emit_orr_w32(e, R_F, R_F, A64_W12);
+    if (fmask & Z80_FLAG_PV) {
+        /* V -> PV (bit 2): add: (~(a^b) & (a^res)).7 ; sub: ((a^b) & (a^res)).7 */
+        emit_eor_w32(e, A64_W12, A64_W9, A64_W1);
+        if (!is_sub)
+            emit_mvn_w32(e, A64_W12, A64_W12);   /* high garbage ANDed away below */
+        emit_eor_w32(e, A64_W15, A64_W9, A64_W14);
+        emit_and_w32(e, A64_W12, A64_W12, A64_W15);
+        emit_lsr_w32_imm(e, A64_W12, A64_W12, 7);
+        emit_lsl_w32_imm(e, A64_W12, A64_W12, 2);
+        emit_orr_w32(e, R_F, R_F, A64_W12);
+    }
 
-    if (is_sub)
+    if (is_sub && (fmask & Z80_FLAG_N))
         (void)emit_orr_w32_imm(e, R_F, R_F, Z80_FLAG_N);
 }
 
@@ -620,14 +638,18 @@ static int alu_op_for(int type) {
  * the FT_INC / FT_DEC table row. W10 is NOT touched, so memory forms
  * can keep the effective address live across the flag update.
  * Clobbers W12, W13. */
-static void emit_incdec8_inline(emit_t *e, int is_inc) {
+static void emit_incdec8_inline(emit_t *e, int is_inc, uint8_t fmask) {
     if (is_inc) emit_add_w32_imm(e, A64_W9, A64_W2, 1);
     else        emit_sub_w32_imm(e, A64_W9, A64_W2, 1);
     (void)emit_and_w32_imm(e, A64_W9, A64_W9, 0xFF);
-    (void)emit_and_w32_imm(e, A64_W13, R_F, Z80_FLAG_C);   /* old C first */
+    if (!(fmask & (0xFF & ~Z80_FLAG_C))) return;   /* only C live: F untouched */
+    int keep_c = (fmask & Z80_FLAG_C) != 0;    /* C passes through */
+    if (keep_c)
+        (void)emit_and_w32_imm(e, A64_W13, R_F, Z80_FLAG_C);  /* old C first */
     emit_add_w32_imm(e, A64_W12, A64_W9, is_inc ? FT_INC : FT_DEC);
     emit_ldrb_reg_uxtw(e, R_F, R_AUX, A64_W12);
-    emit_orr_w32(e, R_F, R_F, A64_W13);
+    if (keep_c)
+        emit_orr_w32(e, R_F, R_F, A64_W13);
 }
 
 /* Inline CB rotate/shift: value in `v` (canonical), result -> W9, the
@@ -635,7 +657,7 @@ static void emit_incdec8_inline(emit_t *e, int is_inc) {
  * flag rule is S|Z|parity|XY from the result — exactly the FT_LOGIC
  * row — plus C). `v` may be R_A. Clobbers W9, W10, W11.
  * grp: 0=RLC 1=RRC 2=RL 3=RR 4=SLA 5=SRA 6=SLL 7=SRL. */
-static void emit_cb_rotshift_inline(emit_t *e, int grp, a64_reg_t v) {
+static void emit_cb_rotshift_inline(emit_t *e, int grp, a64_reg_t v, uint8_t fmask) {
     switch (grp) {
     case 0:  /* RLC: res = (v<<1)|(v>>7), C = v.7 */
         emit_lsr_w32_imm(e, A64_W10, v, 7);
@@ -683,8 +705,10 @@ static void emit_cb_rotshift_inline(emit_t *e, int grp, a64_reg_t v) {
         emit_lsr_w32_imm(e, A64_W9, v, 1);
         break;
     }
+    if (!fmask) return;
     emit_ldrb_reg_uxtw(e, R_F, R_AUX, A64_W9);   /* FT_LOGIC row */
-    emit_orr_w32(e, R_F, R_F, A64_W10);
+    if (fmask & Z80_FLAG_C)
+        emit_orr_w32(e, R_F, R_F, A64_W10);
 }
 
 /* Inline BIT n,<src>: value in `v`, XY source byte in `xy` (both
@@ -927,7 +951,7 @@ static void emit_alu_src_from_reg(emit_t *e, int reg, uint8_t prefix) {
  * did/didn't write F (SCF/CCF need it for the XY Q-quirk); -1 when this
  * is the first op of the block and the live cpu->q must be consulted. */
 static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
-                        int prev_q) {
+                        int prev_q, uint8_t fmask) {
     (void)pc_after;   /* block enders (the only users) live in emit_branch_ender */
     switch (dec->type) {
     case Z80_OP_NOP:
@@ -1037,7 +1061,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
             addr = R_HL;
         }
         emit_ldrb_reg_uxtw(e, A64_W2, R_MEM, addr);        /* W2 = old byte */
-        emit_incdec8_inline(e, dec->type == Z80_OP_INC_HL_ind);
+        emit_incdec8_inline(e, dec->type == Z80_OP_INC_HL_ind, fmask);
         emit_guest_storeb_smc(e, A64_W9, addr);
         return OP_SETS_F_INLINE;
     }
@@ -1051,7 +1075,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
     case Z80_OP_CP_A_HL_ind:  {
         emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
         emit_ldrb_reg_uxtw(e, A64_W1, R_MEM, A64_W10);
-        emit_alu_inline(e, alu_op_for(dec->type));
+        emit_alu_inline(e, alu_op_for(dec->type), fmask);
         return OP_SETS_F_INLINE;
     }
 
@@ -1186,19 +1210,27 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
             emit_strh_imm(e, A64_W13, R_CPU, dst_off);     /* STRH keeps low 16 */
 
         /* Flags — build into R_F (src/W9/W13 already consumed as needed). */
-        emit_movz_w32(e, A64_W12, Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV, 0);
-        emit_and_w32(e, R_F, R_F, A64_W12);
-        emit_eor_w32(e, A64_W12, A64_W9, src);             /* H: (a^b^sum).12 */
-        emit_eor_w32(e, A64_W12, A64_W12, A64_W13);
-        emit_lsr_w32_imm(e, A64_W12, A64_W12, 8);          /*   -> bit 4 */
-        (void)emit_and_w32_imm(e, A64_W12, A64_W12, Z80_FLAG_H);
-        emit_orr_w32(e, R_F, R_F, A64_W12);
-        emit_lsr_w32_imm(e, A64_W12, A64_W13, 16);         /* C: sum bit 16 */
-        emit_orr_w32(e, R_F, R_F, A64_W12);
-        emit_lsr_w32_imm(e, A64_W12, A64_W13, 8);          /* XY from result.hi */
-        emit_movz_w32(e, A64_W14, Z80_FLAG_5 | Z80_FLAG_3, 0);
-        emit_and_w32(e, A64_W12, A64_W12, A64_W14);
-        emit_orr_w32(e, R_F, R_F, A64_W12);
+        if (fmask & 0x3B) {   /* writes C|H|N|XY; S/Z/PV pass through */
+            emit_movz_w32(e, A64_W12, Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV, 0);
+            emit_and_w32(e, R_F, R_F, A64_W12);
+            if (fmask & Z80_FLAG_H) {
+                emit_eor_w32(e, A64_W12, A64_W9, src);     /* H: (a^b^sum).12 */
+                emit_eor_w32(e, A64_W12, A64_W12, A64_W13);
+                emit_lsr_w32_imm(e, A64_W12, A64_W12, 8);  /*   -> bit 4 */
+                (void)emit_and_w32_imm(e, A64_W12, A64_W12, Z80_FLAG_H);
+                emit_orr_w32(e, R_F, R_F, A64_W12);
+            }
+            if (fmask & Z80_FLAG_C) {
+                emit_lsr_w32_imm(e, A64_W12, A64_W13, 16); /* C: sum bit 16 */
+                emit_orr_w32(e, R_F, R_F, A64_W12);
+            }
+            if (fmask & (Z80_FLAG_5 | Z80_FLAG_3)) {
+                emit_lsr_w32_imm(e, A64_W12, A64_W13, 8);  /* XY from result.hi */
+                emit_movz_w32(e, A64_W14, Z80_FLAG_5 | Z80_FLAG_3, 0);
+                emit_and_w32(e, A64_W12, A64_W12, A64_W14);
+                emit_orr_w32(e, R_F, R_F, A64_W12);
+            }
+        }
         return OP_SETS_F_INLINE;
     }
 
@@ -1238,12 +1270,17 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
             emit_orr_w32_lsl(e, R_A, A64_W9, A64_W13, 7);
             break;
         }
-        emit_movz_w32(e, A64_W12, Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV, 0);
-        emit_and_w32(e, R_F, R_F, A64_W12);
-        emit_orr_w32(e, R_F, R_F, A64_W10);                /* carry out */
-        emit_movz_w32(e, A64_W12, Z80_FLAG_5 | Z80_FLAG_3, 0);
-        emit_and_w32(e, A64_W12, R_A, A64_W12);
-        emit_orr_w32(e, R_F, R_F, A64_W12);                /* XY from A' */
+        if (fmask & 0x3B) {   /* writes C|H|N|XY; S/Z/PV pass through */
+            emit_movz_w32(e, A64_W12, Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV, 0);
+            emit_and_w32(e, R_F, R_F, A64_W12);
+            if (fmask & Z80_FLAG_C)
+                emit_orr_w32(e, R_F, R_F, A64_W10);        /* carry out */
+            if (fmask & (Z80_FLAG_5 | Z80_FLAG_3)) {
+                emit_movz_w32(e, A64_W12, Z80_FLAG_5 | Z80_FLAG_3, 0);
+                emit_and_w32(e, A64_W12, R_A, A64_W12);
+                emit_orr_w32(e, R_F, R_F, A64_W12);        /* XY from A' */
+            }
+        }
         return OP_FALL_THROUGH;
     }
 
@@ -1260,13 +1297,15 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
         /* A = ~A. F: H and N set, XY from new A, S/Z/PV/C preserved. */
         emit_mvn_w32(e, A64_W9, R_A);
         (void)emit_and_w32_imm(e, R_A, A64_W9, 0xFF);
-        emit_movz_w32(e, A64_W12, 0xFF & ~(Z80_FLAG_5 | Z80_FLAG_3), 0);
-        emit_and_w32(e, R_F, R_F, A64_W12);
-        emit_movz_w32(e, A64_W12, Z80_FLAG_H | Z80_FLAG_N, 0);
-        emit_orr_w32(e, R_F, R_F, A64_W12);
-        emit_movz_w32(e, A64_W12, Z80_FLAG_5 | Z80_FLAG_3, 0);
-        emit_and_w32(e, A64_W12, R_A, A64_W12);
-        emit_orr_w32(e, R_F, R_F, A64_W12);
+        if (fmask & 0x3A) {   /* writes H|N|XY; S/Z/PV/C pass through */
+            emit_movz_w32(e, A64_W12, 0xFF & ~(Z80_FLAG_5 | Z80_FLAG_3), 0);
+            emit_and_w32(e, R_F, R_F, A64_W12);
+            emit_movz_w32(e, A64_W12, Z80_FLAG_H | Z80_FLAG_N, 0);
+            emit_orr_w32(e, R_F, R_F, A64_W12);
+            emit_movz_w32(e, A64_W12, Z80_FLAG_5 | Z80_FLAG_3, 0);
+            emit_and_w32(e, A64_W12, R_A, A64_W12);
+            emit_orr_w32(e, R_F, R_F, A64_W12);
+        }
         return OP_SETS_F_INLINE;
     }
 
@@ -1276,6 +1315,8 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
      * cpu->q value, so we select at runtime. Leaves xy_src in W13. */
     case Z80_OP_SCF:
     case Z80_OP_CCF: {
+        if (!(fmask & 0x3B))   /* pure flag op; C|H|N|XY all dead → no-op */
+            return OP_SETS_F_INLINE;
         if (prev_q > 0) {
             emit_mov_w32_w32(e, A64_W13, R_A);
         } else if (prev_q == 0) {
@@ -1357,14 +1398,14 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
     case Z80_OP_SBC_A_R: case Z80_OP_AND_A_R: case Z80_OP_OR_A_R:
     case Z80_OP_XOR_A_R: case Z80_OP_CP_A_R: {
         emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
-        emit_alu_inline(e, alu_op_for(dec->type));
+        emit_alu_inline(e, alu_op_for(dec->type), fmask);
         return OP_SETS_F_INLINE;
     }
     case Z80_OP_ADD_A_N: case Z80_OP_ADC_A_N: case Z80_OP_SUB_A_N:
     case Z80_OP_SBC_A_N: case Z80_OP_AND_A_N: case Z80_OP_OR_A_N:
     case Z80_OP_XOR_A_N: case Z80_OP_CP_A_N: {
         emit_movz_w32(e, A64_W1, dec->imm8, 0);
-        emit_alu_inline(e, alu_op_for(dec->type));
+        emit_alu_inline(e, alu_op_for(dec->type), fmask);
         return OP_SETS_F_INLINE;
     }
 
@@ -1374,13 +1415,13 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
         if (dec->reg1 == 6) {
             /* INC/DEC (HL), unprefixed. */
             emit_ldrb_reg_uxtw(e, A64_W2, R_MEM, R_HL);
-            emit_incdec8_inline(e, is_inc);
+            emit_incdec8_inline(e, is_inc, fmask);
             emit_guest_storeb_smc(e, A64_W9, R_HL);
             return OP_SETS_F_INLINE;
         }
         a64_reg_t old = emit_read_r8(e, A64_W2, dec->reg1, dec->prefix);
         if (old != A64_W2) emit_mov_w32_w32(e, A64_W2, old);
-        emit_incdec8_inline(e, is_inc);
+        emit_incdec8_inline(e, is_inc, fmask);
         emit_write_r8(e, dec->reg1, dec->prefix, A64_W9);
         return OP_SETS_F_INLINE;
     }
@@ -1430,7 +1471,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
 
         if (family == 0) {
             /* Rotate / shift, inline: result W9 + F in R_F. */
-            emit_cb_rotshift_inline(e, grp, val);
+            emit_cb_rotshift_inline(e, grp, val, fmask);
             if (is_mem) {
                 if (dual_wb) emit_write_r8(e, r, 0, A64_W9);
                 emit_guest_storeb_smc(e, A64_W9, addr);
@@ -1441,7 +1482,10 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
         }
 
         if (family == 1) {
-            /* BIT n,<src>. No write-back. XY source per form. */
+            /* BIT n,<src>. No write-back — flag-only, so a dead result
+             * means the whole op vanishes. */
+            if (!(fmask & (0xFF & ~Z80_FLAG_C)))
+                return OP_SETS_F_INLINE;
             a64_reg_t xy;
             if (indexed) {
                 emit_lsr_w32_imm(e, A64_W13, addr, 8);     /* addr.hi */
@@ -1553,6 +1597,85 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
         /* Block enders live in emit_branch_ender; can_translate filters
          * everything else. Unreachable. */
         return OP_FALL_THROUGH;
+    }
+}
+
+/* Static F data-flow of one translatable op, for the backward liveness
+ * pass: `wr` = flag bits the op defines, `rd` = bits it consumes — as
+ * arithmetic inputs (ADC's carry), helper-visible state (DAA, LDIR), or
+ * pass-through sources its emitted flag code re-reads from the pinned F
+ * (INC preserving C, rotates preserving S/Z/PV). Bits an op leaves
+ * untouched are neither read nor written: eliding the flag code IS the
+ * pass-through. Reads are conservative — counted even when the op's own
+ * flag output ends up dead. */
+static void op_flag_effects(const z80_decoded *dec, uint8_t *rd, uint8_t *wr) {
+    const uint8_t XY = Z80_FLAG_5 | Z80_FLAG_3;
+    const uint8_t SZP = Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV;
+    *rd = 0; *wr = 0;
+    switch (dec->type) {
+    case Z80_OP_ADD_A_R: case Z80_OP_ADD_A_N: case Z80_OP_ADD_A_HL_ind:
+    case Z80_OP_SUB_A_R: case Z80_OP_SUB_A_N: case Z80_OP_SUB_A_HL_ind:
+    case Z80_OP_AND_A_R: case Z80_OP_AND_A_N: case Z80_OP_AND_A_HL_ind:
+    case Z80_OP_OR_A_R:  case Z80_OP_OR_A_N:  case Z80_OP_OR_A_HL_ind:
+    case Z80_OP_XOR_A_R: case Z80_OP_XOR_A_N: case Z80_OP_XOR_A_HL_ind:
+    case Z80_OP_CP_A_R:  case Z80_OP_CP_A_N:  case Z80_OP_CP_A_HL_ind:
+        *wr = 0xFF;
+        break;
+    case Z80_OP_ADC_A_R: case Z80_OP_ADC_A_N: case Z80_OP_ADC_A_HL_ind:
+    case Z80_OP_SBC_A_R: case Z80_OP_SBC_A_N: case Z80_OP_SBC_A_HL_ind:
+        *wr = 0xFF; *rd = Z80_FLAG_C;
+        break;
+    case Z80_OP_INC_R: case Z80_OP_DEC_R:
+    case Z80_OP_INC_HL_ind: case Z80_OP_DEC_HL_ind:
+        *wr = 0xFF & ~Z80_FLAG_C; *rd = Z80_FLAG_C;
+        break;
+    case Z80_OP_ADD_HL_RR:
+        *wr = Z80_FLAG_C | Z80_FLAG_H | Z80_FLAG_N | XY; *rd = SZP;
+        break;
+    case Z80_OP_RLCA: case Z80_OP_RRCA:
+        *wr = Z80_FLAG_C | Z80_FLAG_H | Z80_FLAG_N | XY; *rd = SZP;
+        break;
+    case Z80_OP_RLA: case Z80_OP_RRA:
+        *wr = Z80_FLAG_C | Z80_FLAG_H | Z80_FLAG_N | XY;
+        *rd = SZP | Z80_FLAG_C;
+        break;
+    case Z80_OP_DAA:
+        *wr = 0xFF; *rd = Z80_FLAG_C | Z80_FLAG_H | Z80_FLAG_N;
+        break;
+    case Z80_OP_CPL:
+        *wr = Z80_FLAG_H | Z80_FLAG_N | XY; *rd = SZP | Z80_FLAG_C;
+        break;
+    case Z80_OP_SCF: case Z80_OP_CCF:
+        /* XY may source from A|F (the Q quirk) — treat as reads-all. */
+        *wr = Z80_FLAG_C | Z80_FLAG_H | Z80_FLAG_N | XY; *rd = 0xFF;
+        break;
+    case Z80_OP_CB: {
+        unsigned family = dec->imm8 >> 6;
+        int grp = (dec->imm8 >> 3) & 7;
+        if (family == 0) {              /* rotate/shift */
+            *wr = 0xFF;
+            if (grp == 2 || grp == 3)   /* RL / RR take carry-in */
+                *rd = Z80_FLAG_C;
+        } else if (family == 1) {       /* BIT */
+            *wr = 0xFF & ~Z80_FLAG_C; *rd = Z80_FLAG_C;
+        }                                /* RES/SET: no flag effect */
+        break;
+    }
+    case Z80_OP_LDIR: case Z80_OP_LDDR:
+        /* Helper reads the synced F byte and preserves S/Z/C. */
+        *wr = Z80_FLAG_H | Z80_FLAG_PV | Z80_FLAG_N | XY; *rd = 0xFF;
+        break;
+    case Z80_OP_PUSH_RR:
+        if (dec->reg1 == 3) *rd = 0xFF;         /* PUSH AF */
+        break;
+    case Z80_OP_POP_RR:
+        if (dec->reg1 == 3) *wr = 0xFF;         /* POP AF */
+        break;
+    default:
+        /* Loads/stores/EX/16-bit INC/DEC/control flow: no F effect.
+         * Conditional enders read their tested flag, but enders are
+         * always last and liveness starts at 0xFF there anyway. */
+        break;
     }
 }
 
@@ -1752,53 +1875,85 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     };
     uint8_t *entry = dbt->code_buf + e.offset;
 
+    /* ---- Phase 1: decode the whole block. ---- */
+    z80_decoded decs[MAX_BLOCK_INSNS];
+    uint16_t    pc_afters[MAX_BLOCK_INSNS];
     uint16_t pc = guest_pc;
-    uint32_t insns = 0;
+    uint32_t n_ops = 0;
     int ended_by_branch = 0;
-    int q_mode = Q_CLEAR;
-    int prev_q = -1;   /* first op: prev insn's q is the live cpu->q */
 
-    while (insns < MAX_BLOCK_INSNS) {
-        z80_decoded dec;
-        int n = z80_decode_one(cpu->mem, pc, &dec);
+    while (n_ops < MAX_BLOCK_INSNS) {
+        z80_decoded *dec = &decs[n_ops];
+        int n = z80_decode_one(cpu->mem, pc, dec);
         if (n == 0) break;   /* decode failed — let interp report it */
 
-        uint16_t pc_after = (uint16_t)(pc + dec.bytes);
-        if (!can_translate(&dec, pc_after)) {
-            if (insns == 0) {
+        uint16_t pc_after = (uint16_t)(pc + dec->bytes);
+        if (!can_translate(dec, pc_after)) {
+            if (n_ops == 0) {
                 /* Refuse the block — caller falls back to interp. */
                 return NULL;
             }
             break;
         }
-
-        if (is_block_ender(dec.type)) {
-            /* Enders never write F, so the block-final q is 0 regardless
-             * of q_mode so far. Prologue first (q + insn count, once for
-             * all paths), then the branch guts + per-successor edges. */
-            insns++;
-            pc = pc_after;
-            emit_tail_prologue(&e, insns, Q_CLEAR);
-            emit_branch_ender(dbt, &e, &dec, pc_after);
+        pc_afters[n_ops] = pc_after;
+        n_ops++;
+        pc = pc_after;
+        if (is_block_ender(dec->type)) {
             ended_by_branch = 1;
             break;
         }
+    }
 
-        unsigned r = emit_op(&e, &dec, pc_after, prev_q);
+    if (n_ops == 0) return NULL;
+
+    /* ---- Phase 2: backward F-bit liveness (dead flag elimination).
+     *
+     * fmask[i] = the flag bits still live immediately AFTER op i: only
+     * those must be architecturally correct once the op retires. Bits
+     * an op writes that aren't in its fmask are overwritten by a later
+     * op before any reader (conditional branch, ADC-style data input,
+     * helper, PUSH AF) can see them, so the emitters skip that code —
+     * dead bits may hold any value. The block exit marks all bits live
+     * because successor blocks, the interpreter, and -V all observe the
+     * full F there. */
+    uint8_t fmask[MAX_BLOCK_INSNS];
+    {
+        uint8_t live = 0xFF;
+        for (int i = (int)n_ops - 1; i >= 0; i--) {
+            uint8_t rd, wr;
+            op_flag_effects(&decs[i], &rd, &wr);
+            fmask[i] = live;
+            live = (uint8_t)((live & (uint8_t)~wr) | rd);
+        }
+    }
+
+    /* ---- Phase 3: emit. ---- */
+    int q_mode = Q_CLEAR;
+    int prev_q = -1;   /* first op: prev insn's q is the live cpu->q */
+
+    for (uint32_t i = 0; i < n_ops; i++) {
+        const z80_decoded *dec = &decs[i];
+
+        if (is_block_ender(dec->type)) {
+            /* Enders never write F, so the block-final q is 0 regardless
+             * of q_mode so far. Prologue first (q + insn count, once for
+             * all paths), then the branch guts + per-successor edges. */
+            emit_tail_prologue(&e, n_ops, Q_CLEAR);
+            emit_branch_ender(dbt, &e, dec, pc_afters[i]);
+            break;
+        }
+
+        unsigned r = emit_op(&e, dec, pc_afters[i], prev_q, fmask[i]);
         if      (r & OP_MODIFIES_F)    q_mode = Q_KEEP;
         else if (r & OP_SETS_F_INLINE) q_mode = Q_SET;
         else                           q_mode = Q_CLEAR;
         prev_q = (q_mode != Q_CLEAR);
-        insns++;
-        pc = pc_after;
     }
-
-    if (insns == 0) return NULL;
 
     /* Fall-through end (block cap or untranslatable next op): the next
      * pc is the static straight-line successor — a linkable edge. */
     if (!ended_by_branch) {
-        emit_tail_prologue(&e, insns, q_mode);
+        emit_tail_prologue(&e, n_ops, q_mode);
         emit_edge(dbt, &e, pc);
     }
 
