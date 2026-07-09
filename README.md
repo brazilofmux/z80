@@ -1,63 +1,77 @@
-# z80 — 10 BIPS CP/M Monster
+# z80 — the 10 BIPS CP/M Monster
 
 > *"WordStar at the speed of light on a virtual Kaypro from the year 2142."*
 
-A ridiculously overpowered Z80 + CP/M execution environment, built for the sheer joy of making 1980s software run at absurd speeds on modern silicon.
+A ridiculously overpowered Z80 + CP/M execution environment, built for the sheer joy of making 1980s software run at absurd speeds on modern silicon. A 4 MHz Z80 managed roughly 0.5 MIPS. This one does **3.9 billion** Z80 instructions per second on an Apple Silicon laptop — about 8,000× the hardware WordStar was written for.
 
-## The Dream
+No good reason. Maximum vibes.
 
-- Run real CP/M 2.2 / 3.0 software (WordStar, dBASE II, Turbo Pascal, MBASIC, Zork, etc.) at **billions** of Z80 instructions per second.
-- Emulate a "Kaypro 5000" (or any classic machine) with perfect terminal feel, but with 10GB/s RAM disks and zero-wait-state everything.
-- Use the same dynamic binary translation techniques honed in `~/slow-32/tools/dbt` and `~/riscv/dbt`, but applied to the glorious mess that is the Z80 ISA.
-- No good reason. Maximum vibes.
+## Measured Performance
 
-## Architecture
+All numbers from an M-series MacBook, single core:
 
-This is a **dynamic binary translator** (DBT) first, interpreter second.
+| Workload | Rate |
+|----------|------|
+| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **3.9 BIPS** |
+| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~2.0 BIPS** |
+| Same workloads, reference interpreter | ~230 MIPS |
 
-```
-guest:  Z80 + CP/M 2.2/3 + Kaypro video/keyboard
-host:   x86-64 or AArch64 (Apple Silicon preferred for the numbers)
-```
+The JIT's interpreter-fallback rate on real workloads is ~0.02% — essentially everything runs as translated native code. Real software runs today: Zork 1, MS COBOL (the compiler *and* its output), and the zexdoc/zexall instruction exercisers pass 67/67 with correct CRCs.
 
-Key components (will grow):
+## How It Goes Fast
 
-- `core/` — Z80 decoder, interpreter (golden reference), state
-- `dbt/`  — the monster: block cache, register caching for AF/BC/DE/HL/IX/IY/SP, flag minimization, block chaining, superblocks, intrinsics for LDIR/LDDR etc.
-- `cpm/`  — BDOS + BIOS shims, .COM loader, drive mapping (host dir ↔ drive A:)
-- `kaypro/` — 80×24 video, function keys, character set, "Kaypro terminal" escape sequences
-- `tools/` — disk image tools, stats, disassembler aids
+This is a **dynamic binary translator** (DBT) first, interpreter second. The interpreter is the golden reference; the translator is the monster. The big levers, in the order they landed:
 
-## Performance Target
+- **Pinned guest registers.** BC, DE, HL, SP, A, and F live permanently in AArch64 callee-saved registers across translated blocks *and* across block-to-block chains. `LD A,B` is one host instruction. `(HL)` accesses need no address load at all. Guest state only touches memory at JIT entry/exit and around the two remaining helper calls (DAA, LDIR/LDDR).
+- **Direct block linking.** Every statically-known control-flow edge — fall-through, `JP`, `JR`, `CALL`, and both arms of every conditional — is a patchable branch aimed directly at the target block's native code. A hot loop's back-edge is literally `TST; B.cond; B` into the next translation. Blocks never return to the dispatcher until they must.
+- **Fully inline flags.** The Z80's F register is assembled in a host register from result-indexed lookup tables plus a few identities (carry-recovery for H, sign-xor for V). No helper calls, no lazy-flag descriptors — eager turned out to be cheap enough once A and F stopped living in memory.
+- **Self-modifying-code tracking that doesn't give up.** A per-byte code bitmap makes every guest store check whether it just clobbered translated code (one ADD+LDRB+CBZ on the fast path). zexdoc patches its test instruction millions of times and re-runs it; the invalidation, unlink, and retranslation machinery survives the full run in lockstep with the interpreter.
+- **Block-op intrinsics.** LDIR/LDDR run as host-speed copies with the documented overlap semantics and a batched SMC sweep.
 
-| Workload                  | Target (M-series / Zen 5) |
-|---------------------------|---------------------------|
-| Straight-line Z80 (MOV/ADD/INC loops) | **5–12 BIPS** |
-| Typical WordStar editing  | **2–4 BIPS** (with screen updates) |
-| dBASE II indexed queries  | **1+ BIPS** |
-| vs. qemu-z80 or z80pack  | 30–100× faster |
+### Verification
 
-(These numbers are ridiculous on purpose. We will cheat with every trick: lazy flags, intrinsic block ops, hot-path specialization, RAS for CALL/RET, etc.)
+The correctness story is as unreasonable as the performance story:
 
-## Status
+- `-V` runs a **shadow interpreter in lockstep**: after every translated block, all registers (including the undocumented XY flags, MEMPTR, and the Q quirk) and all 64 KB of memory are compared. The *entire* 5.76-billion-instruction zexdoc run passes under this.
+- zexdoc **and** zexall (undocumented flags included) pass 67/67 under the JIT.
+- JIT and interpreter execute bit-identical instruction streams on real workloads — same instruction counts, same output.
 
-**Fresh directory.** Clean slate. This is where the monster is born.
+## Layout
 
-See [CLAUDE.md](CLAUDE.md) for architecture notes and development workflow.
+- `core/` — Z80 decoder, reference interpreter, CPU state
+- `dbt/` — the translator: AArch64 backend, block cache, direct-link registry, flag tables, SMC tracking, shadow verify
+- `cpm/` — BDOS/BIOS shims, `.COM` loader, host-directory-as-drive-A: mapping
+- `kaypro/` — machine personality (early stub; terminal video/keyboard to come)
+- `tests/`, `tools/`, `bench/` — generated test programs and the COBOL benchmark harness
+- `disks/` — CP/M software used for testing (zexdoc/zexall, Zork 1, MS COBOL)
 
-## Building & Running (eventual)
+## Building & Running
+
+Requires an AArch64 host for the JIT (developed on Apple Silicon macOS; the x86-64 backend is a stub that falls back to the interpreter).
 
 ```bash
 make
-./z80-monster -k wordstar.com     # or ./z80-monster disk.img
+./z80-monster -j -s disks/zork1/ZORK1.COM     # JIT + stats
+./z80-monster -i prog.com                     # reference interpreter
+./z80-monster -V prog.com                     # JIT with lockstep shadow verify
+make bench                                    # SQUARO benchmark, jit vs interp
 ```
 
-## References & Lineage
+The directory containing the `.COM` file becomes drive A:. Console I/O is raw termios with buffered output.
 
-- Dynamic binary translation techniques from `~/slow-32/tools/dbt` (full lifting + BURG + SSA) and the lighter `~/riscv/dbt`
-- CP/M 2.2/3.0 interface (BDOS function 0–40+, BIOS)
-- Classic machines: Kaypro II/4/10, Osborne 1, Morrow, etc.
-- The eternal question: "What would WordStar feel like if it had been written for a 3 GHz Z80 with 64 MB of RAM?"
+## Status & Road to 10 BIPS
+
+Working today: the full documented + useful-undocumented instruction set split between translator and interpreter fallback, CP/M 2.2 BDOS/BIOS shims sufficient for real applications, SMC, and the verification machinery. Not yet: Kaypro terminal emulation, interrupts, banked memory (CP/M 3), cycle counting (we lie cheerfully).
+
+Remaining performance levers: superblocks across conditional branches, a return-address stack for `RET` prediction, lazy flag materialization, and memptr dead-store elision. The target is a status line that says **10 BIPS** while WordStar search-and-replaces a 50-page document before the keyboard interrupt returns.
+
+See [CLAUDE.md](CLAUDE.md) for the full architecture notes and development history.
+
+## Lineage
+
+The techniques here were honed on two earlier DBTs by the same authors (an RV32IMFD translator and a full-lifting SSA-based one for a custom ISA), then aimed at one of the most irregular 8-bit ISAs ever shipped in volume: four prefix bytes, 700+ opcode variants, and a flag register designed in 1976.
+
+MIT licensed. CP/M software in `disks/` belongs to its respective rights holders.
 
 ---
 
