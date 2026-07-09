@@ -44,6 +44,7 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
     switch (func) {
     case CPM_F_WBOOT:   /* 0 - warm boot / exit */
         /* Program wants to return to CCP or terminate */
+        fflush(stdout);   /* buffered console output must land before exit */
         return 0;   /* tell the run loop to stop */
 
     case CPM_F_CONOUT:  /* 2 - console output char in E */
