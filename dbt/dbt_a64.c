@@ -53,9 +53,13 @@
 int dbt_jit_available(void) { return 1; }
 
 /* Superblocks keep translating through conditionals (side exits) only
- * while the block is shorter than this many guest bytes — the block's
- * byte span widens the SMC invalidation window (see dbt.h), so length
- * is a real cost on self-modifying workloads, not just code size. */
+ * while the block is shorter than this many guest bytes. The cap used
+ * to be load-bearing (block byte-span widened the SMC invalidation
+ * window, and every store paid for the whole window); span-gated
+ * sweeps removed that cost, and re-measurement with cap 96 showed the
+ * limit barely binds anyway — SQUARO merged 3 blocks of 383 and both
+ * benches stayed flat. Blocks end at natural unconditional control
+ * flow first. Kept at the validated 48 as a bigger-SMC-target hedge. */
 #define SUPERBLOCK_BYTE_CAP 48
 
 /* Pinned-register aliases (see convention above). */
