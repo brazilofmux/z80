@@ -52,6 +52,12 @@
 
 int dbt_jit_available(void) { return 1; }
 
+/* Superblocks keep translating through conditionals (side exits) only
+ * while the block is shorter than this many guest bytes — the block's
+ * byte span widens the SMC invalidation window (see dbt.h), so length
+ * is a real cost on self-modifying workloads, not just code size. */
+#define SUPERBLOCK_BYTE_CAP 48
+
 /* Pinned-register aliases (see convention above). */
 #define R_CPU  A64_W19
 #define R_MEM  A64_W20
@@ -1671,24 +1677,116 @@ static void op_flag_effects(const z80_decoded *dec, uint8_t *rd, uint8_t *wr) {
     case Z80_OP_POP_RR:
         if (dec->reg1 == 3) *wr = 0xFF;         /* POP AF */
         break;
+    case Z80_OP_JP_CC_NN: case Z80_OP_JR_CC_E: case Z80_OP_DJNZ:
+    case Z80_OP_CALL_CC_NN: case Z80_OP_RET_CC:
+        /* Mid-block side exit: the taken arm leaves the block, where
+         * every flag bit is observable. (Also covers the tested flag.) */
+        *rd = 0xFF;
+        break;
     default:
-        /* Loads/stores/EX/16-bit INC/DEC/control flow: no F effect.
-         * Conditional enders read their tested flag, but enders are
-         * always last and liveness starts at 0xFF there anyway. */
+        /* Loads/stores/EX/16-bit INC/DEC/unconditional control flow:
+         * no F effect. */
         break;
     }
 }
 
-/* Is this op a block ender (handled by emit_branch_ender, not emit_op)? */
-static int is_block_ender(int type) {
+/* Unconditional control flow always ends a superblock. */
+static int is_uncond_ender(int type) {
     switch (type) {
-    case Z80_OP_JP_NN:   case Z80_OP_JP_HL:     case Z80_OP_JR_E:
-    case Z80_OP_CALL_NN: case Z80_OP_RET:       case Z80_OP_JP_CC_NN:
-    case Z80_OP_JR_CC_E: case Z80_OP_DJNZ:      case Z80_OP_CALL_CC_NN:
-    case Z80_OP_RET_CC:
+    case Z80_OP_JP_NN: case Z80_OP_JP_HL: case Z80_OP_JR_E:
+    case Z80_OP_CALL_NN: case Z80_OP_RET:
         return 1;
     default:
         return 0;
+    }
+}
+
+/* Conditional control flow becomes a mid-block SIDE EXIT: the taken arm
+ * is emitted as an out-of-line chunk after the block and translation
+ * continues through the not-taken fall-through. Only when a conditional
+ * is the last decoded op does it get the classic two-edge ender. */
+static int is_cond_ender(int type) {
+    switch (type) {
+    case Z80_OP_JP_CC_NN: case Z80_OP_JR_CC_E: case Z80_OP_DJNZ:
+    case Z80_OP_CALL_CC_NN: case Z80_OP_RET_CC:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Emit a conditional op's inline part — always-executed guts (memptr for
+ * JP cc/CALL cc, the B decrement for DJNZ), the flag/counter test, and
+ * the B.cond toward the taken arm. Returns the B.cond's offset for the
+ * caller to patch at the taken chunk. NZCV is live between the test and
+ * the branch only. */
+static uint32_t emit_cond_side_branch(emit_t *e, const z80_decoded *dec) {
+    uint32_t patch_taken;
+    switch (dec->type) {
+    case Z80_OP_JP_CC_NN:
+    case Z80_OP_CALL_CC_NN:
+        /* memptr = nn on BOTH paths (interp sets it regardless). */
+        emit_movz_w32(e, A64_W9, dec->imm16, 0);
+        emit_strh_imm(e, A64_W9, R_CPU, OFF_MEMPTR);
+        /* fall through */
+    case Z80_OP_JR_CC_E:
+    case Z80_OP_RET_CC:
+        emit_test_z80_flag(e, flag_mask_for_cc(dec->cc));
+        patch_taken = emit_pos(e);
+        emit_b_cond(e, host_cond_for_cc(dec->cc), 0);
+        break;
+    default: {   /* DJNZ: B = (B-1) & 0xFF, taken when B != 0 */
+        emit_ubfx_w32(e, A64_W9, R_BC, 8, 8);
+        emit_sub_w32_imm(e, A64_W9, A64_W9, 1);
+        (void)emit_and_w32_imm(e, A64_W9, A64_W9, 0xFF);
+        emit_bfi_w32(e, R_BC, A64_W9, 8, 8);
+        emit_cmp_w32_imm(e, A64_W9, 0);
+        patch_taken = emit_pos(e);
+        emit_b_cond(e, A64_COND_NE, 0);
+        break;
+    }
+    }
+    return patch_taken;
+}
+
+/* Emit a conditional op's taken-arm tail: memptr quirks, CALL's push /
+ * RET's pop, then the outgoing edge (static targets) or dynamic probe
+ * (RET cc). The caller has already emitted the tail prologue for this
+ * path. */
+static void emit_cond_taken_tail(z80_dbt_t *dbt, emit_t *e,
+                                 const z80_decoded *dec, uint16_t pc_after) {
+    switch (dec->type) {
+    case Z80_OP_JP_CC_NN:
+        emit_edge(dbt, e, dec->imm16);     /* memptr stored inline */
+        break;
+    case Z80_OP_JR_CC_E:
+    case Z80_OP_DJNZ: {
+        /* memptr = target only on the taken path. */
+        uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
+        emit_movz_w32(e, A64_W9, target, 0);
+        emit_strh_imm(e, A64_W9, R_CPU, OFF_MEMPTR);
+        emit_edge(dbt, e, target);
+        break;
+    }
+    case Z80_OP_CALL_CC_NN:
+        /* Push pc_after; memptr stored inline. */
+        emit_sub_mask16(e, R_SP, R_SP, 2);
+        emit_movz_w32(e, A64_W9, pc_after & 0xFF, 0);
+        emit_strb_reg_uxtw(e, A64_W9, R_MEM, R_SP);
+        emit_add_mask16(e, A64_W12, R_SP, 1);
+        emit_movz_w32(e, A64_W9, (pc_after >> 8) & 0xFF, 0);
+        emit_strb_reg_uxtw(e, A64_W9, R_MEM, A64_W12);
+        emit_edge(dbt, e, dec->imm16);
+        break;
+    default:   /* RET cc: pop a run-time pc -> dynamic tail */
+        emit_ldrb_reg_uxtw(e, A64_W9, R_MEM, R_SP);
+        emit_add_mask16(e, A64_W12, R_SP, 1);
+        emit_ldrb_reg_uxtw(e, A64_W10, R_MEM, A64_W12);
+        emit_orr_w32_lsl(e, A64_W0, A64_W9, A64_W10, 8);
+        emit_strh_imm(e, A64_W0, R_CPU, OFF_MEMPTR);
+        emit_add_mask16(e, R_SP, R_SP, 2);
+        emit_dynamic_tail(e, dbt->exit_stub_off);
+        break;
     }
 }
 
@@ -1757,104 +1855,29 @@ static void emit_branch_ender(z80_dbt_t *dbt, emit_t *e,
         return;
     }
 
-    case Z80_OP_JP_CC_NN: {
-        /* memptr = nn (always — interp sets it regardless). */
-        uint16_t target = dec->imm16;
-        emit_movz_w32(e, A64_W9, target, 0);
-        emit_strh_imm(e, A64_W9, R_CPU, OFF_MEMPTR);
-
-        emit_test_z80_flag(e, flag_mask_for_cc(dec->cc));
-        uint32_t patch_taken = emit_pos(e);
-        emit_b_cond(e, host_cond_for_cc(dec->cc), 0);
-        emit_edge(dbt, e, pc_after);                       /* not taken */
-        emit_patch_cond19(e, patch_taken, emit_pos(e));
-        emit_edge(dbt, e, target);                         /* taken */
-        return;
-    }
-
-    case Z80_OP_JR_CC_E: {
-        /* memptr = target only on the taken path. */
-        uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
-        emit_test_z80_flag(e, flag_mask_for_cc(dec->cc));
-        uint32_t patch_taken = emit_pos(e);
-        emit_b_cond(e, host_cond_for_cc(dec->cc), 0);
-        emit_edge(dbt, e, pc_after);                       /* not taken */
-        emit_patch_cond19(e, patch_taken, emit_pos(e));
-        emit_movz_w32(e, A64_W9, target, 0);
-        emit_strh_imm(e, A64_W9, R_CPU, OFF_MEMPTR);
-        emit_edge(dbt, e, target);                         /* taken */
-        return;
-    }
-
-    case Z80_OP_DJNZ: {
-        /* B = (B - 1) & 0xFF; taken when B != 0; memptr only on taken. */
-        uint16_t target = (uint16_t)(pc_after + (int16_t)dec->disp);
-
-        emit_ubfx_w32(e, A64_W9, R_BC, 8, 8);
-        emit_sub_w32_imm(e, A64_W9, A64_W9, 1);
-        (void)emit_and_w32_imm(e, A64_W9, A64_W9, 0xFF);
-        emit_bfi_w32(e, R_BC, A64_W9, 8, 8);
-
-        emit_cmp_w32_imm(e, A64_W9, 0);
-        uint32_t patch_taken = emit_pos(e);
-        emit_b_cond(e, A64_COND_NE, 0);
-        emit_edge(dbt, e, pc_after);                       /* B == 0: exit loop */
-        emit_patch_cond19(e, patch_taken, emit_pos(e));
-        emit_movz_w32(e, A64_W9, target, 0);
-        emit_strh_imm(e, A64_W9, R_CPU, OFF_MEMPTR);
-        emit_edge(dbt, e, target);                         /* loop back */
-        return;
-    }
-
-    case Z80_OP_CALL_CC_NN: {
-        /* memptr = nn (always); push only on the taken path. */
-        uint16_t target = dec->imm16;
-        emit_movz_w32(e, A64_W9, target, 0);
-        emit_strh_imm(e, A64_W9, R_CPU, OFF_MEMPTR);
-
-        emit_test_z80_flag(e, flag_mask_for_cc(dec->cc));
-        uint32_t patch_taken = emit_pos(e);
-        emit_b_cond(e, host_cond_for_cc(dec->cc), 0);
-        emit_edge(dbt, e, pc_after);                       /* not taken */
-
-        emit_patch_cond19(e, patch_taken, emit_pos(e));
-        emit_sub_mask16(e, R_SP, R_SP, 2);
-        emit_movz_w32(e, A64_W9, pc_after & 0xFF, 0);
-        emit_strb_reg_uxtw(e, A64_W9, R_MEM, R_SP);
-        emit_add_mask16(e, A64_W12, R_SP, 1);
-        emit_movz_w32(e, A64_W9, (pc_after >> 8) & 0xFF, 0);
-        emit_strb_reg_uxtw(e, A64_W9, R_MEM, A64_W12);
-        emit_edge(dbt, e, target);                         /* taken */
-        return;
-    }
-
+    case Z80_OP_JP_CC_NN:
+    case Z80_OP_JR_CC_E:
+    case Z80_OP_DJNZ:
+    case Z80_OP_CALL_CC_NN:
     case Z80_OP_RET_CC: {
-        /* Taken path pops a run-time pc → dynamic tail; not-taken is a
-         * static edge to pc_after. */
-        emit_test_z80_flag(e, flag_mask_for_cc(dec->cc));
-        uint32_t patch_taken = emit_pos(e);
-        emit_b_cond(e, host_cond_for_cc(dec->cc), 0);
+        /* Conditional in final position: classic two-edge ender —
+         * not-taken edge first (straight-line likely path), taken arm
+         * as the shared taken-tail. */
+        uint32_t patch_taken = emit_cond_side_branch(e, dec);
         emit_edge(dbt, e, pc_after);                       /* not taken */
-
         emit_patch_cond19(e, patch_taken, emit_pos(e));
-        emit_ldrb_reg_uxtw(e, A64_W9, R_MEM, R_SP);
-        emit_add_mask16(e, A64_W12, R_SP, 1);
-        emit_ldrb_reg_uxtw(e, A64_W10, R_MEM, A64_W12);
-        emit_orr_w32_lsl(e, A64_W0, A64_W9, A64_W10, 8);
-        emit_strh_imm(e, A64_W0, R_CPU, OFF_MEMPTR);
-        emit_add_mask16(e, R_SP, R_SP, 2);
-        emit_dynamic_tail(e, dbt->exit_stub_off);
+        emit_cond_taken_tail(dbt, e, dec, pc_after);
         return;
     }
 
     default:
-        /* is_block_ender filters this; unreachable. */
+        /* is_uncond_ender / is_cond_ender filter this; unreachable. */
         return;
     }
 }
 
 uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
-    if (dbt->code_used + 16384 > CODE_BUF_SIZE) {
+    if (dbt->code_used + 32768 > CODE_BUF_SIZE) {
         /* Out of JIT space — blow away the cache and reset the cursor.
          * Cheap-and-cheerful; chained blocks would need patch-back here.
          *
@@ -1880,7 +1903,6 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     uint16_t    pc_afters[MAX_BLOCK_INSNS];
     uint16_t pc = guest_pc;
     uint32_t n_ops = 0;
-    int ended_by_branch = 0;
 
     while (n_ops < MAX_BLOCK_INSNS) {
         z80_decoded *dec = &decs[n_ops];
@@ -1898,10 +1920,18 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
         pc_afters[n_ops] = pc_after;
         n_ops++;
         pc = pc_after;
-        if (is_block_ender(dec->type)) {
-            ended_by_branch = 1;
+        if (is_uncond_ender(dec->type))
             break;
-        }
+        /* Conditionals do NOT end the superblock: translation continues
+         * through the not-taken fall-through; the taken arm becomes an
+         * out-of-line side exit emitted after the block — but only while
+         * the block stays short in GUEST bytes. Block byte-length feeds
+         * max_block_bytes, which is the per-store SMC invalidation
+         * window: letting superblocks grow unboundedly made zexdoc's
+         * 7M invalidating stores scan twice the slots. */
+        if (is_cond_ender(dec->type) &&
+            (uint16_t)(pc - guest_pc) >= SUPERBLOCK_BYTE_CAP)
+            break;
     }
 
     if (n_ops == 0) return NULL;
@@ -1928,19 +1958,38 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     }
 
     /* ---- Phase 3: emit. ---- */
+    struct { uint32_t patch_off; uint32_t insns; uint32_t op; } sides[MAX_BLOCK_INSNS];
+    uint32_t n_sides = 0;
     int q_mode = Q_CLEAR;
     int prev_q = -1;   /* first op: prev insn's q is the live cpu->q */
+    int final_by_branch = 0;
 
     for (uint32_t i = 0; i < n_ops; i++) {
         const z80_decoded *dec = &decs[i];
 
-        if (is_block_ender(dec->type)) {
+        if (is_uncond_ender(dec->type) ||
+            (is_cond_ender(dec->type) && i == n_ops - 1)) {
             /* Enders never write F, so the block-final q is 0 regardless
              * of q_mode so far. Prologue first (q + insn count, once for
              * all paths), then the branch guts + per-successor edges. */
             emit_tail_prologue(&e, n_ops, Q_CLEAR);
             emit_branch_ender(dbt, &e, dec, pc_afters[i]);
+            final_by_branch = 1;
             break;
+        }
+
+        if (is_cond_ender(dec->type)) {
+            /* Mid-block side exit: inline guts + B.cond toward a taken
+             * chunk emitted after the block; fall through and keep
+             * translating the not-taken path. Architecturally the branch
+             * doesn't write F, so q continues as 0. */
+            sides[n_sides].patch_off = emit_cond_side_branch(&e, dec);
+            sides[n_sides].insns = i + 1;
+            sides[n_sides].op = i;
+            n_sides++;
+            q_mode = Q_CLEAR;
+            prev_q = 0;
+            continue;
         }
 
         unsigned r = emit_op(&e, dec, pc_afters[i], prev_q, fmask[i]);
@@ -1952,9 +2001,19 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
 
     /* Fall-through end (block cap or untranslatable next op): the next
      * pc is the static straight-line successor — a linkable edge. */
-    if (!ended_by_branch) {
+    if (!final_by_branch) {
         emit_tail_prologue(&e, n_ops, q_mode);
         emit_edge(dbt, &e, pc);
+    }
+
+    /* ---- Side-exit chunks: the taken arms of mid-block conditionals.
+     * Each pays its own tail prologue with the exact instruction count
+     * for its path (the ops executed up to AND including the branch). */
+    for (uint32_t k = 0; k < n_sides; k++) {
+        emit_patch_cond19(&e, sides[k].patch_off, emit_pos(&e));
+        emit_tail_prologue(&e, sides[k].insns, Q_CLEAR);
+        emit_cond_taken_tail(dbt, &e, &decs[sides[k].op],
+                             pc_afters[sides[k].op]);
     }
 
     dbt->code_used = e.offset;

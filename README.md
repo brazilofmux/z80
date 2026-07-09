@@ -2,7 +2,7 @@
 
 > *"WordStar at the speed of light on a virtual Kaypro from the year 2142."*
 
-A ridiculously overpowered Z80 + CP/M execution environment, built for the sheer joy of making 1980s software run at absurd speeds on modern silicon. A 4 MHz Z80 managed roughly 0.5 MIPS. This one does **4.2 billion** Z80 instructions per second on an Apple Silicon laptop — over 8,000× the hardware WordStar was written for.
+A ridiculously overpowered Z80 + CP/M execution environment, built for the sheer joy of making 1980s software run at absurd speeds on modern silicon. A 4 MHz Z80 managed roughly 0.5 MIPS. This one does **4.3 billion** Z80 instructions per second on an Apple Silicon laptop — over 8,000× the hardware WordStar was written for.
 
 No good reason. Maximum vibes.
 
@@ -12,7 +12,7 @@ All numbers from an M-series MacBook, single core:
 
 | Workload | Rate |
 |----------|------|
-| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.2 BIPS** |
+| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** |
 | zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~2.0 BIPS** |
 | Same workloads, reference interpreter | ~230 MIPS |
 
@@ -24,6 +24,7 @@ This is a **dynamic binary translator** (DBT) first, interpreter second. The int
 
 - **Pinned guest registers.** BC, DE, HL, SP, A, and F live permanently in AArch64 callee-saved registers across translated blocks *and* across block-to-block chains. `LD A,B` is one host instruction. `(HL)` accesses need no address load at all. Guest state only touches memory at JIT entry/exit and around the two remaining helper calls (DAA, LDIR/LDDR).
 - **Direct block linking.** Every statically-known control-flow edge — fall-through, `JP`, `JR`, `CALL`, and both arms of every conditional — is a patchable branch aimed directly at the target block's native code. A hot loop's back-edge is literally `TST; B.cond; B` into the next translation. Blocks never return to the dispatcher until they must.
+- **Superblocks.** Conditional branches don't end translation: the taken arm becomes an out-of-line side exit and the translator keeps going through the fall-through, so straight-line runs cross `JR cc` / `DJNZ` / `RET cc` without paying a block boundary. Length is capped in guest bytes because block span is also the self-modifying-code invalidation window — everything is a trade.
 - **Dead-flag elimination.** The Z80 sets flags on nearly every instruction; almost nobody looks at them. A backward liveness pass over each block computes, per instruction and per flag bit, which bits can actually be observed — and the emitters skip the rest. `ADD` before another `ADD` emits no flag code at all; `ADD` before `JR C` emits just the carry. What survives is assembled inline from result-indexed lookup tables plus a few identities (carry-recovery for H, sign-xor for V) — no helper calls, no runtime lazy-flag descriptors, all decided at translation time.
 - **Self-modifying-code tracking that doesn't give up.** A per-byte code bitmap makes every guest store check whether it just clobbered translated code (one ADD+LDRB+CBZ on the fast path). zexdoc patches its test instruction millions of times and re-runs it; the invalidation, unlink, and retranslation machinery survives the full run in lockstep with the interpreter.
 - **Block-op intrinsics.** LDIR/LDDR run as host-speed copies with the documented overlap semantics and a batched SMC sweep.
@@ -64,7 +65,7 @@ The directory containing the `.COM` file becomes drive A:. Console I/O is raw te
 
 Working today: the full documented + useful-undocumented instruction set split between translator and interpreter fallback, CP/M 2.2 BDOS/BIOS shims sufficient for real applications, SMC, and the verification machinery. Not yet: Kaypro terminal emulation, interrupts, banked memory (CP/M 3), cycle counting (we lie cheerfully).
 
-Remaining performance levers: superblocks across conditional branches, memptr dead-store elision, and inline LDIR fast paths. (A hardware-paired return-address stack for `RET` was built, measured a consistent loss — Apple Silicon's indirect-branch predictor already nails the inline cache probe — and reverted; the design notes live in `dbt/dbt_a64.c` so nobody builds it twice.) The target is a status line that says **10 BIPS** while WordStar search-and-replaces a 50-page document before the keyboard interrupt returns.
+The general-purpose levers are mostly pulled. What remains is smaller and more surgical: memptr dead-store elision, inline LDIR fast paths, per-entry SMC windows (which would let superblocks grow past their current cap), and eventually per-application specialization — recognizing WordStar's screen loop or dBASE's B-tree walk and cheating accordingly, which was always the endgame the design docs promised. (A hardware-paired return-address stack for `RET` was built, measured a consistent loss — Apple Silicon's indirect-branch predictor already nails the inline cache probe — and reverted; the design notes live in `dbt/dbt_a64.c` so nobody builds it twice.) The target is still a status line that says **10 BIPS** while WordStar search-and-replaces a 50-page document before the keyboard interrupt returns; the road there is now paved with special cases, and we are at peace with that.
 
 See [CLAUDE.md](CLAUDE.md) for the full architecture notes and development history.
 
