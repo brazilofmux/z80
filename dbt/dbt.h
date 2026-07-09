@@ -74,6 +74,30 @@ _Static_assert(sizeof(z80_block_entry_t) == 16, "z80_block_entry_t must be 16 by
 #define MAX_BLOCK_INSNS    64
 #endif
 
+/* ---- Direct block linking ----
+ *
+ * Every static control-flow edge (fall-through, JP nn, JR, CALL nn, and
+ * both arms of the conditional branches) is emitted as a patchable B
+ * instruction followed by the generic probe+exit fallback. When the
+ * target block exists, the B jumps straight to its native code; when it
+ * doesn't (yet), the B falls through to the probe (B .+4).
+ *
+ * The registry below records every link site keyed by target guest PC:
+ *   - dbt_cache_insert patches all pending sites for the inserted PC;
+ *   - SMC invalidation unpatches sites whose target was clobbered
+ *     (records are kept — a later re-translation re-links them);
+ *   - a full cache+code-buffer reset just resets the pool (all sites
+ *     live in the discarded code).
+ * Pool exhaustion degrades gracefully: un-recorded edges are never
+ * direct-linked and keep using the probe. */
+#define LINK_POOL_SIZE   (512 * 1024)
+#define LINK_NONE        0xFFFFFFFFu
+
+typedef struct {
+    uint32_t site_off;   /* code-buffer offset of the patchable B */
+    uint32_t next;       /* next record for the same target pc, or LINK_NONE */
+} z80_link_t;
+
 #define CODE_BUF_SIZE      (64 * 1024 * 1024)   /* 64 MB JIT buffer */
 
 typedef struct {
@@ -104,6 +128,17 @@ typedef struct {
 
     z80_block_entry_t cache[BLOCK_CACHE_SIZE];
 
+    /* Direct-link registry (see the z80_link_t comment above).
+     * link_free chains recycled records: an unlink (repatch to NULL)
+     * frees the whole per-pc list — without this, workloads that
+     * retranslate the same PCs constantly (zexdoc's patch-and-run
+     * loops) accumulate dead-site records without bound and every
+     * invalidation walk goes quadratic. */
+    uint32_t   link_head[BLOCK_CACHE_SIZE];
+    z80_link_t link_pool[LINK_POOL_SIZE];
+    uint32_t   link_used;
+    uint32_t   link_free;
+
     uint8_t *code_buf;
     uint32_t code_used;
 
@@ -121,6 +156,9 @@ typedef struct {
     uint64_t jit_block_entries;
     uint64_t smc_invalidations;
     uint64_t verify_blocks_checked;
+    uint64_t links_created;
+    uint64_t links_patched;
+    uint64_t links_unpatched;
 
     /* Largest byte-length of any block currently in the cache. Used as the
      * SMC invalidation window: a store at A might invalidate any block
@@ -160,6 +198,17 @@ z80_block_entry_t *dbt_cache_lookup(z80_dbt_t *dbt, uint16_t pc);
 void               dbt_cache_insert(z80_dbt_t *dbt, uint16_t pc, uint8_t *code);
 void               dbt_cache_invalidate_all(z80_dbt_t *dbt);
 
+/* Direct-link registry (block_cache.c).
+ *
+ * dbt_link_record: register a patchable-B site that wants to reach `pc`.
+ *   Returns 0 (and records nothing) when the pool is full — the caller
+ *   must then leave the site unlinked (probe path) permanently.
+ * dbt_links_repatch: point every recorded site for `pc` at `code`
+ *   (NULL → unlink back to the probe fallback). Handles the W^X bracket
+ *   itself, so it must NOT be called while a bracket is already open. */
+int  dbt_link_record(z80_dbt_t *dbt, uint16_t pc, uint32_t site_off);
+void dbt_links_repatch(z80_dbt_t *dbt, uint16_t pc, uint8_t *code);
+
 /* Mark guest bytes [start, end) as "covered by a cached block" so a
  * subsequent JIT store to any byte in that range triggers SMC
  * invalidation. Idempotent. */
@@ -180,5 +229,10 @@ void dbt_mark_block_bytes(z80_dbt_t *dbt, uint16_t start, uint32_t end);
  * ---------------------------------------------------------------------- */
 uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc);
 void     dbt_emit_trampoline(z80_dbt_t *dbt);
+
+/* Rewrite the patchable B at `site_off` to jump to `target`, or back to
+ * its probe fallback (site + 4) when target is NULL. Caller must hold
+ * the W^X writable bracket; the I-cache flush happens here. */
+void dbt_arch_patch_link(z80_dbt_t *dbt, uint32_t site_off, uint8_t *target);
 
 #endif /* DBT_H */

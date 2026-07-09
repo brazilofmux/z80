@@ -18,3 +18,10 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     (void)guest_pc;
     return NULL;
 }
+
+void dbt_arch_patch_link(z80_dbt_t *dbt, uint32_t site_off, uint8_t *target) {
+    /* No translated code exists on this backend, so no sites to patch. */
+    (void)dbt;
+    (void)site_off;
+    (void)target;
+}

@@ -372,6 +372,7 @@ static void ldir_lddr_common(z80_cpu_t *cpu, int incr) {
         uint16_t p = (uint16_t)(dst_lo + k - window + 1);
         dbt->cache[p & BLOCK_CACHE_MASK].guest_pc    = BLOCK_EMPTY_PC;
         dbt->cache[p & BLOCK_CACHE_MASK].native_code = NULL;
+        dbt_links_repatch(dbt, p, NULL);   /* see dbt_invalidate_for_store */
     }
     dbt->smc_invalidations++;
 }
