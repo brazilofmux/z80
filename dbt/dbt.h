@@ -6,11 +6,20 @@
  * that can trap) ends the block early and the run loop steps the
  * interpreter for that single instruction before retrying the JIT.
  *
- * Block ABI: a translated block is entered with
- *   X19 = z80_cpu_t *cpu        (callee-saved)
- *   X20 = cpu->mem (uint8_t *)  (callee-saved)
- *   X21 = z80_block_entry_t *   cache base (callee-saved)
- * and exits via RET after updating cpu->pc.
+ * Block ABI (AArch64): guest hot state is PINNED in callee-saved host
+ * registers across blocks and chains:
+ *   X19 = z80_cpu_t *cpu
+ *   X20 = cpu->mem (uint8_t *)
+ *   X21 = guest BC   X22 = guest DE   X23 = guest HL   X26 = guest SP
+ *   X27 = guest A    X28 = guest F    (all canonical zero-extended)
+ *   X24 = JIT aux base (&dbt->jit_ftables: flag tables +0, code bitmap
+ *         +0x10000, block cache +0x20000)
+ *   X25 = pending insn count
+ * The trampoline loads the pinned set from the context and BRs into the
+ * block; blocks chain to each other with the state live and exit by
+ * branching to a shared exit stub that spills everything back to the
+ * context and unwinds the trampoline frame. cpu->* is only authoritative
+ * outside JIT execution (and inside helper calls, which sync explicitly).
  */
 #ifndef DBT_H
 #define DBT_H
@@ -70,7 +79,17 @@ _Static_assert(sizeof(z80_block_entry_t) == 16, "z80_block_entry_t must be 16 by
 typedef struct {
     z80_cpu_t *cpu;
 
-    z80_block_entry_t cache[BLOCK_CACHE_SIZE];
+    /* ---- JIT aux block ----
+     * Translated code reaches all three JIT-side tables through ONE
+     * pinned base register (X24 = &jit_ftables), using fixed offsets:
+     *   +0x00000  jit_ftables  — copy of z80_f_tables (result-indexed
+     *                            flag bytes; see dbt_flags.h)
+     *   +0x10000  code_bitmap  — reached via ADD #16, LSL#12
+     *   +0x20000  cache        — reached via ADD #32, LSL#12
+     * The members must stay in this order with these exact sizes; the
+     * _Static_asserts after the struct pin the layout. */
+    _Alignas(16) uint8_t jit_ftables[1024];
+    uint8_t  _aux_pad[0x10000 - 1024];
 
     /* Per-guest-byte tag: nonzero iff some currently-cached block covers
      * this byte. JIT-emitted stores call into z80_jit_post_store(), which
@@ -83,8 +102,16 @@ typedef struct {
      * "patch the test op, run it, repeat" loop is exactly this pattern. */
     uint8_t  code_bitmap[65536];
 
+    z80_block_entry_t cache[BLOCK_CACHE_SIZE];
+
     uint8_t *code_buf;
     uint32_t code_used;
+
+    /* Buffer offset of the shared exit stub (emitted right after the
+     * trampoline). Block tails B here on a chain miss instead of RETing;
+     * the stub spills the pinned guest registers, flushes the pending
+     * insn count, and unwinds the trampoline frame. */
+    uint32_t exit_stub_off;
 
     /* Stats */
     uint64_t blocks_translated;
@@ -112,6 +139,12 @@ typedef struct {
     z80_cpu_t shadow_cpu;
     uint8_t  *shadow_mem;        /* 64 KB, allocated lazily */
 } z80_dbt_t;
+
+/* The JIT aux block layout translated code depends on (X24-relative). */
+_Static_assert(offsetof(z80_dbt_t, code_bitmap) - offsetof(z80_dbt_t, jit_ftables)
+               == 0x10000, "code_bitmap must sit at jit_ftables + 0x10000");
+_Static_assert(offsetof(z80_dbt_t, cache) - offsetof(z80_dbt_t, jit_ftables)
+               == 0x20000, "cache must sit at jit_ftables + 0x20000");
 
 /* ----------------------------------------------------------------------
  * Public API

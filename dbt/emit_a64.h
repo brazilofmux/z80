@@ -410,6 +410,15 @@ static inline void emit_add_w32_imm(emit_t *e, a64_reg_t rd, a64_reg_t rn, uint3
     emit_inst(e, inst);
 }
 
+/* ADD Wd, Wn, #imm12, LSL #12 — adds imm12 << 12. Lets the pinned-register
+ * backend reach the +0x10000 (bitmap) and +0x20000 (cache) segments of the
+ * JIT aux block in a single instruction. */
+static inline void emit_add_w32_imm_lsl12(emit_t *e, a64_reg_t rd, a64_reg_t rn, uint32_t imm12) {
+    uint32_t inst = 0x11400000u | ((imm12 & 0xFFFu) << 10)
+                  | ((uint32_t)(rn & 0x1F) << 5) | (rd & 0x1F);
+    emit_inst(e, inst);
+}
+
 static inline void emit_sub_w32(emit_t *e, a64_reg_t rd, a64_reg_t rn, a64_reg_t rm) {
     uint32_t inst = 0x4B000000u | ((uint32_t)(rm & 0x1F) << 16)
                   | ((uint32_t)(rn & 0x1F) << 5) | (rd & 0x1F);
@@ -602,6 +611,40 @@ static inline bool emit_eor_w32_imm(emit_t *e, a64_reg_t rd, a64_reg_t rn, uint3
 static inline void emit_mvn_w32(emit_t *e, a64_reg_t rd, a64_reg_t rm) {
     /* ORN Wd, WZR, Wm */
     uint32_t inst = 0x2A2003E0u | ((uint32_t)(rm & 0x1F) << 16) | (rd & 0x1F);
+    emit_inst(e, inst);
+}
+
+/* ORR Wd, Wn, Wm, LSL #shift — shifted-register OR. Assembles hi:lo
+ * halfwords (e.g. POP's hi<<8|lo, PUSH AF's A<<8|F) in one insn. */
+static inline void emit_orr_w32_lsl(emit_t *e, a64_reg_t rd, a64_reg_t rn,
+                                    a64_reg_t rm, uint32_t shift) {
+    uint32_t inst = 0x2A000000u | ((uint32_t)(rm & 0x1F) << 16)
+                  | ((shift & 0x1Fu) << 10)
+                  | ((uint32_t)(rn & 0x1F) << 5) | (rd & 0x1F);
+    emit_inst(e, inst);
+}
+
+/* BFI Wd, Wn, #lsb, #width — insert the low `width` bits of Wn into Wd
+ * at bit position lsb, leaving the rest of Wd intact (BFM alias). The
+ * pinned-register backend writes one 8-bit half of a guest 16-bit pair
+ * this way without disturbing the other half. */
+static inline void emit_bfi_w32(emit_t *e, a64_reg_t rd, a64_reg_t rn,
+                                uint32_t lsb, uint32_t width) {
+    uint32_t immr = (32u - lsb) & 31u;
+    uint32_t imms = (width - 1u) & 31u;
+    uint32_t inst = 0x33000000u | ((immr & 0x3Fu) << 16) | ((imms & 0x3Fu) << 10)
+                  | ((uint32_t)(rn & 0x1F) << 5) | (rd & 0x1F);
+    emit_inst(e, inst);
+}
+
+/* UBFX Wd, Wn, #lsb, #width — extract `width` bits at lsb, zero-extended
+ * (UBFM alias). Reads one 8-bit half of a pinned guest register pair. */
+static inline void emit_ubfx_w32(emit_t *e, a64_reg_t rd, a64_reg_t rn,
+                                 uint32_t lsb, uint32_t width) {
+    uint32_t immr = lsb & 31u;
+    uint32_t imms = (lsb + width - 1u) & 31u;
+    uint32_t inst = 0x53000000u | ((immr & 0x3Fu) << 16) | ((imms & 0x3Fu) << 10)
+                  | ((uint32_t)(rn & 0x1F) << 5) | (rd & 0x1F);
     emit_inst(e, inst);
 }
 

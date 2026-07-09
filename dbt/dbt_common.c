@@ -38,6 +38,9 @@ int dbt_init(z80_dbt_t *dbt, z80_cpu_t *cpu) {
     dbt->cpu = cpu;
     cpu->dbt = dbt;
     z80_flag_tables_init();
+    /* JIT blocks index the flag tables through the pinned aux base (X24),
+     * so keep a copy at aux offset 0. Helpers still use the global. */
+    memcpy(dbt->jit_ftables, z80_f_tables, sizeof(z80_f_tables));
     dbt_cache_invalidate_all(dbt);
 
     dbt->code_buf = mmap(NULL, CODE_BUF_SIZE,
@@ -128,10 +131,10 @@ static int verify_first_diff(const z80_cpu_t *jit, const z80_cpu_t *interp) {
 }
 
 /* Trampoline signature: called from C with the register-binding
- * arguments the backend trampoline expects. */
+ * arguments the backend trampoline expects. `aux` is &dbt->jit_ftables —
+ * flag tables at +0, code bitmap at +0x10000, block cache at +0x20000. */
 typedef void (*trampoline_fn_t)(z80_cpu_t *cpu, uint8_t *mem,
-                                void *block, void *cache_base,
-                                void *bitmap_base, void *flag_tables);
+                                void *block, void *aux);
 
 int dbt_run(z80_dbt_t *dbt) {
     z80_cpu_t *cpu = dbt->cpu;
@@ -224,8 +227,7 @@ int dbt_run(z80_dbt_t *dbt) {
 
                 /* Run the JIT block on the real cpu/mem. */
                 dbt->jit_block_entries++;
-                trampoline(cpu, cpu->mem, code, dbt->cache, dbt->code_bitmap,
-                           z80_f_tables);
+                trampoline(cpu, cpu->mem, code, dbt->jit_ftables);
 
                 uint64_t jit_insns = cpu->insn_count - insns_before;
                 z80_cpu_t post_jit = *cpu;
@@ -278,8 +280,7 @@ int dbt_run(z80_dbt_t *dbt) {
             }
 
             dbt->jit_block_entries++;
-            trampoline(cpu, cpu->mem, code, dbt->cache, dbt->code_bitmap,
-                       z80_f_tables);
+            trampoline(cpu, cpu->mem, code, dbt->jit_ftables);
             continue;
         }
 
