@@ -957,7 +957,7 @@ static void emit_alu_src_from_reg(emit_t *e, int reg, uint8_t prefix) {
  * did/didn't write F (SCF/CCF need it for the XY Q-quirk); -1 when this
  * is the first op of the block and the live cpu->q must be consulted. */
 static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
-                        int prev_q, uint8_t fmask) {
+                        int prev_q, uint8_t fmask, int store_memptr) {
     (void)pc_after;   /* block enders (the only users) live in emit_branch_ender */
     switch (dec->type) {
     case Z80_OP_NOP:
@@ -1087,35 +1087,36 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
 
     case Z80_OP_LD_A_BC: {
         emit_ldrb_reg_uxtw(e, R_A, R_MEM, R_BC);
-        emit_set_memptr_rr_plus_one(e, R_BC);
+        if (store_memptr) emit_set_memptr_rr_plus_one(e, R_BC);
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_A_DE: {
         emit_ldrb_reg_uxtw(e, R_A, R_MEM, R_DE);
-        emit_set_memptr_rr_plus_one(e, R_DE);
+        if (store_memptr) emit_set_memptr_rr_plus_one(e, R_DE);
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_BC_A: {
         emit_guest_storeb_smc(e, R_A, R_BC);
-        emit_set_memptr_quirk_rr(e, R_BC);
+        if (store_memptr) emit_set_memptr_quirk_rr(e, R_BC);
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_DE_A: {
         emit_guest_storeb_smc(e, R_A, R_DE);
-        emit_set_memptr_quirk_rr(e, R_DE);
+        if (store_memptr) emit_set_memptr_quirk_rr(e, R_DE);
         return OP_FALL_THROUGH;
     }
 
     case Z80_OP_LD_A_NN: {
         emit_load_imm16_into(e, A64_W10, dec->imm16);
         emit_ldrb_reg_uxtw(e, R_A, R_MEM, A64_W10);
-        emit_set_memptr_imm(e, (uint16_t)(dec->imm16 + 1));
+        if (store_memptr) emit_set_memptr_imm(e, (uint16_t)(dec->imm16 + 1));
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_NN_A: {
         emit_load_imm16_into(e, A64_W10, dec->imm16);
         emit_guest_storeb_smc(e, R_A, A64_W10);
-        emit_set_memptr_quirk_imm(e, (uint8_t)((dec->imm16 + 1) & 0xFF));
+        if (store_memptr)
+            emit_set_memptr_quirk_imm(e, (uint8_t)((dec->imm16 + 1) & 0xFF));
         return OP_FALL_THROUGH;
     }
 
@@ -1136,7 +1137,8 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
         } else {
             emit_orr_w32_lsl(e, R_HL, A64_W9, A64_W11, 8);
         }
-        emit_strh_imm(e, A64_W10, R_CPU, OFF_MEMPTR);      /* memptr = nn1 */
+        if (store_memptr)
+            emit_strh_imm(e, A64_W10, R_CPU, OFF_MEMPTR);  /* memptr = nn1 */
         return OP_FALL_THROUGH;
     }
     case Z80_OP_LD_NN_HL: {
@@ -1159,7 +1161,7 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
             emit_lsr_w32_imm(e, A64_W9, R_HL, 8);
             emit_guest_storeb_smc(e, A64_W9, A64_W10);
         }
-        emit_set_memptr_imm(e, nn1);
+        if (store_memptr) emit_set_memptr_imm(e, nn1);
         return OP_FALL_THROUGH;
     }
 
@@ -1207,8 +1209,10 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
 
         emit_add_w32(e, A64_W13, A64_W9, src);             /* sum, C at bit 16 */
 
-        emit_add_mask16(e, A64_W12, A64_W9, 1);            /* memptr = old dst + 1 */
-        emit_strh_imm(e, A64_W12, R_CPU, OFF_MEMPTR);
+        if (store_memptr) {
+            emit_add_mask16(e, A64_W12, A64_W9, 1);        /* memptr = old dst + 1 */
+            emit_strh_imm(e, A64_W12, R_CPU, OFF_MEMPTR);
+        }
 
         if (dst_host >= 0)
             (void)emit_and_w32_imm(e, (a64_reg_t)dst_host, A64_W13, 0xFFFF);
@@ -1372,13 +1376,15 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
             emit_strb_reg_uxtw(e, A64_W14, R_MEM, A64_W12);
             emit_orr_w32_lsl(e, A64_W9, A64_W9, A64_W10, 8);
             emit_strh_imm(e, A64_W9, R_CPU, off);
-            emit_strh_imm(e, A64_W9, R_CPU, OFF_MEMPTR);
+            if (store_memptr)
+                emit_strh_imm(e, A64_W9, R_CPU, OFF_MEMPTR);
         } else {
             emit_strb_reg_uxtw(e, R_HL, R_MEM, R_SP);      /* mem[sp] = L */
             emit_lsr_w32_imm(e, A64_W14, R_HL, 8);
             emit_strb_reg_uxtw(e, A64_W14, R_MEM, A64_W12);/* mem[sp+1] = H */
             emit_orr_w32_lsl(e, R_HL, A64_W9, A64_W10, 8); /* HL = hi:lo */
-            emit_strh_imm(e, R_HL, R_CPU, OFF_MEMPTR);
+            if (store_memptr)
+                emit_strh_imm(e, R_HL, R_CPU, OFF_MEMPTR);
         }
         return OP_FALL_THROUGH;
     }
@@ -1690,6 +1696,45 @@ static void op_flag_effects(const z80_decoded *dec, uint8_t *rd, uint8_t *wr) {
     }
 }
 
+/* Memptr data-flow class of one translatable op, for the backward
+ * memptr-liveness pass (dead-store elision). */
+enum {
+    MPTR_NONE = 0,        /* doesn't touch memptr */
+    MPTR_WRITE,           /* unconditional store — elidable when dead */
+    MPTR_WRITE_FIXED,     /* stores on both paths of a conditional; the
+                             taken exit observes it, so the store itself
+                             is never elidable — but it still kills
+                             upstream liveness */
+    MPTR_READ             /* BIT n,(HL) reads memptr.high for XY */
+};
+static int op_memptr_effect(const z80_decoded *dec) {
+    switch (dec->type) {
+    case Z80_OP_LD_A_BC: case Z80_OP_LD_A_DE:
+    case Z80_OP_LD_BC_A: case Z80_OP_LD_DE_A:
+    case Z80_OP_LD_A_NN: case Z80_OP_LD_NN_A:
+    case Z80_OP_LD_HL_indNN: case Z80_OP_LD_NN_HL:
+    case Z80_OP_ADD_HL_RR: case Z80_OP_EX_SP_HL:
+        return MPTR_WRITE;
+    case Z80_OP_JP_CC_NN: case Z80_OP_CALL_CC_NN:
+        return MPTR_WRITE_FIXED;
+    case Z80_OP_CB:
+        /* Conservative: counted as a read even when the BIT itself gets
+         * dead-flag-elided. */
+        if (dec->prefix == 0xCB && (dec->imm8 >> 6) == 1
+            && (dec->imm8 & 7) == 6)
+            return MPTR_READ;
+        return MPTR_NONE;
+    default:
+        /* Everything else — including JR cc / DJNZ / RET cc side exits,
+         * whose taken chunks store memptr themselves before leaving, so
+         * only the fall-through's requirement flows through. Note DJNZ /
+         * JR cc as FINAL ops still work: liveness starts at 1 for the
+         * block end, and their not-taken exit (which leaves memptr
+         * unchanged, observably) is covered by that. */
+        return MPTR_NONE;
+    }
+}
+
 /* Unconditional control flow always ends a superblock. */
 static int is_uncond_ender(int type) {
     switch (type) {
@@ -1947,13 +1992,22 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
      * because successor blocks, the interpreter, and -V all observe the
      * full F there. */
     uint8_t fmask[MAX_BLOCK_INSNS];
+    uint8_t mstore[MAX_BLOCK_INSNS];   /* memptr dead-store elision */
     {
         uint8_t live = 0xFF;
+        uint8_t mlive = 1;             /* block exits observe memptr */
         for (int i = (int)n_ops - 1; i >= 0; i--) {
             uint8_t rd, wr;
             op_flag_effects(&decs[i], &rd, &wr);
             fmask[i] = live;
             live = (uint8_t)((live & (uint8_t)~wr) | rd);
+
+            switch (op_memptr_effect(&decs[i])) {
+            case MPTR_WRITE:       mstore[i] = mlive; mlive = 0; break;
+            case MPTR_WRITE_FIXED: mstore[i] = 1;     mlive = 0; break;
+            case MPTR_READ:        mstore[i] = 0;     mlive = 1; break;
+            default:               mstore[i] = 1;                break;
+            }
         }
     }
 
@@ -1992,7 +2046,7 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
             continue;
         }
 
-        unsigned r = emit_op(&e, dec, pc_afters[i], prev_q, fmask[i]);
+        unsigned r = emit_op(&e, dec, pc_afters[i], prev_q, fmask[i], mstore[i]);
         if      (r & OP_MODIFIES_F)    q_mode = Q_KEEP;
         else if (r & OP_SETS_F_INLINE) q_mode = Q_SET;
         else                           q_mode = Q_CLEAR;
