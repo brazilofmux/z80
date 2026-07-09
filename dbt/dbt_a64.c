@@ -308,8 +308,16 @@ static void emit_block_prologue(emit_t *e) {
     emit_mov_x64_x64(e, A64_W22, A64_W30);
 }
 
-/* Per-block tail: optionally clear cpu->q (when the last emitted op did
- * NOT modify F — helpers set q=1 themselves, so leave their write alone),
+/* What the block tail must do to cpu->q so it matches what the interp
+ * would leave after the block's LAST instruction (z80_step zeroes q,
+ * then F-writing ops set it to 1):
+ *   Q_CLEAR — last op does not write F (or is an interp quirk like the
+ *             accumulator rotates, which don't set q): store 0.
+ *   Q_KEEP  — last op called a flag helper, which stored q=1 itself.
+ *   Q_SET   — last op wrote F with inline code (no helper): store 1. */
+enum { Q_CLEAR = 0, Q_KEEP = 1, Q_SET = 2 };
+
+/* Per-block tail: fix up cpu->q per the mode above,
  * bump insn_count by delta, restore LR from X22, then attempt to chain
  * directly to the next block via an inline cache probe. On a probe miss
  * (no cached translation for the next PC, or a collision), fall through
@@ -321,9 +329,12 @@ static void emit_block_prologue(emit_t *e) {
  * plain BR, X30 still holds the trampoline-return that block A's tail
  * restored). RET in the miss path therefore lands back in the trampoline
  * as if no chaining had happened. */
-static void emit_block_tail(emit_t *e, uint32_t insn_count_delta, int clear_q) {
-    if (clear_q) {
+static void emit_block_tail(emit_t *e, uint32_t insn_count_delta, int q_mode) {
+    if (q_mode == Q_CLEAR) {
         emit_strb_imm(e, A64_WZR, A64_W19, OFF_Q);
+    } else if (q_mode == Q_SET) {
+        emit_movz_w32(e, A64_W9, 1, 0);
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_Q);
     }
 
     emit_ldr_x64_imm(e, A64_W9, A64_W19, OFF_INSN_COUNT);
@@ -362,10 +373,10 @@ static void emit_block_tail(emit_t *e, uint32_t insn_count_delta, int clear_q) {
 /* Convenience: write cpu->pc = final_pc, then emit tail. Used by blocks
  * that fall through (no branch op already wrote pc). */
 static void emit_block_epilogue(emit_t *e, uint16_t final_pc,
-                                uint32_t insn_count_delta, int clear_q) {
+                                uint32_t insn_count_delta, int q_mode) {
     emit_movz_w32(e, A64_W9, final_pc, 0);
     emit_strh_imm(e, A64_W9, A64_W19, OFF_PC);
-    emit_block_tail(e, insn_count_delta, clear_q);
+    emit_block_tail(e, insn_count_delta, q_mode);
 }
 
 /* Emit "MOV X0, X19 ; MOVZ/K X9, <helper> ; BLR X9". Result lands in W0
@@ -380,6 +391,7 @@ static void emit_call_helper(emit_t *e, void *helper_addr) {
 #define OP_FALL_THROUGH 0x0
 #define OP_ENDS_BLOCK   0x1     /* op wrote cpu->pc and the block must end */
 #define OP_MODIFIES_F   0x2     /* helper set cpu->f and cpu->q=1 */
+#define OP_SETS_F_INLINE 0x4    /* inline code wrote cpu->f; q=1 owed by tail */
 
 /* A "trap target" is any PC the interpreter knows how to dispatch as a
  * host service. JP NN traps on BDOS (0x0005) and the BIOS vector range;
@@ -445,6 +457,20 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_DEC_RR:
         return rr_offset(dec->reg1) >= 0;
 
+    /* ADD HL,rr — and under DD/FD, ADD IX,rr / ADD IY,rr. reg1==2 names
+     * the destination register itself (ADD HL,HL / ADD IX,IX). */
+    case Z80_OP_ADD_HL_RR:
+        return dec->reg1 >= 0 && dec->reg1 <= 3;
+
+    /* Accumulator rotates + DAA. DD/FD-prefixed forms are decode quirks;
+     * leave those to the interp. */
+    case Z80_OP_RLCA:
+    case Z80_OP_RRCA:
+    case Z80_OP_RLA:
+    case Z80_OP_RRA:
+    case Z80_OP_DAA:
+        return !idx;
+
     /* 8-bit ALU A,<src>. reg=6 means (HL) / (IX+d) / (IY+d); the helper
      * path takes a byte either way. Codes 8/9 require DD/FD prefix —
      * reg8_offset_p resolves them. */
@@ -469,11 +495,12 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_CP_A_N:
         return !idx;
 
-    /* INC/DEC r — reg=6 is (HL) (or (IX+d)/(IY+d), but that uses the
-     * INC_HL_ind / DEC_HL_ind opcodes). Half-index regs land here under
-     * DD/FD via reg8_offset_p(8|9). */
+    /* INC/DEC r — reg=6 is unprefixed (HL); the (IX+d)/(IY+d) forms
+     * decode as INC_HL_ind / DEC_HL_ind instead. Half-index regs land
+     * here under DD/FD via reg8_offset_p(8|9). */
     case Z80_OP_INC_R:
     case Z80_OP_DEC_R:
+        if (dec->reg1 == 6) return !idx;
         return reg8_offset_p(dec->reg1, dec->prefix) >= 0;
 
     /* DD/FD-prefixed indexed memory ops. (Unprefixed LD r,(HL) / (HL),r
@@ -486,8 +513,11 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
         return idx && reg8_offset(dec->reg2) >= 0;
     case Z80_OP_LD_HL_R_ind:
         return idx && reg8_offset(dec->reg2) >= 0;
+    /* INC/DEC (HL) — also the unprefixed form; the emit case picks HL
+     * vs (IX|IY)+d by prefix. */
     case Z80_OP_INC_HL_ind:
     case Z80_OP_DEC_HL_ind:
+        return 1;
     case Z80_OP_ADD_A_HL_ind:
     case Z80_OP_ADC_A_HL_ind:
     case Z80_OP_SUB_A_HL_ind:
@@ -665,25 +695,23 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         emit_guest_storeb_w9_at_w10_smc(e);
         return OP_FALL_THROUGH;
     }
-    case Z80_OP_INC_HL_ind: {
-        /* mem[eff] = INC8(mem[eff]). The store goes through the SMC
-         * helper since the byte we just modified might be code. */
-        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+    case Z80_OP_INC_HL_ind:
+    case Z80_OP_DEC_HL_ind: {
+        /* mem[eff] = INC8/DEC8(mem[eff]). eff = HL unprefixed, or
+         * (IX|IY)+d under DD/FD. The store goes through the SMC helper
+         * since the byte we just modified might be code. */
+        int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
+        void *helper = (dec->type == Z80_OP_INC_HL_ind)
+                           ? (void *)(uintptr_t)z80_jit_inc8
+                           : (void *)(uintptr_t)z80_jit_dec8;
+        if (idx) emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        else     emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
         emit_guest_loadb_w9_at_w10(e);          /* W9 = old byte */
         emit_mov_w32_w32(e, A64_W1, A64_W9);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_inc8);
+        emit_call_helper(e, helper);
         /* helper returns new value in W0; addr W10 was clobbered. Reload. */
-        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
-        emit_mov_w32_w32(e, A64_W9, A64_W0);
-        emit_guest_storeb_w9_at_w10_smc(e);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_DEC_HL_ind: {
-        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
-        emit_guest_loadb_w9_at_w10(e);
-        emit_mov_w32_w32(e, A64_W1, A64_W9);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_dec8);
-        emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        if (idx) emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
+        else     emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
         emit_mov_w32_w32(e, A64_W9, A64_W0);
         emit_guest_storeb_w9_at_w10_smc(e);
         return OP_MODIFIES_F;
@@ -812,6 +840,103 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_FALL_THROUGH;
     }
 
+    case Z80_OP_ADD_HL_RR: {
+        /* ADD HL,rr (or ADD IX,rr / ADD IY,rr under DD/FD).
+         *   memptr = old dst + 1
+         *   dst   += src
+         *   F: S/Z/PV preserved; N=0; C = carry out of bit 15;
+         *      H = carry out of bit 11; XY from result high byte.
+         * Fully inline — no helper call. H uses the carry-recovery
+         * identity: bit 12 of (a ^ b ^ (a+b)) is the carry INTO bit 12,
+         * i.e. the half-carry. */
+        int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
+        uint32_t off_dst = idx ? (uint32_t)idx_reg_offset(dec->prefix) : OFF_HL;
+        uint32_t off_src = (dec->reg1 == 2) ? off_dst      /* ADD HL,HL etc. */
+                                            : (uint32_t)rr_offset(dec->reg1);
+
+        emit_ldrh_imm(e, A64_W9, A64_W19, off_dst);        /* W9 = old dst */
+        if (off_src == off_dst)
+            emit_mov_w32_w32(e, A64_W11, A64_W9);
+        else
+            emit_ldrh_imm(e, A64_W11, A64_W19, off_src);   /* W11 = src */
+        emit_add_w32(e, A64_W13, A64_W9, A64_W11);         /* W13 = sum, C at bit 16 */
+
+        emit_add_mask16(e, A64_W12, A64_W9, 1);            /* memptr = old dst + 1 */
+        emit_strh_imm(e, A64_W12, A64_W19, OFF_MEMPTR);
+        emit_strh_imm(e, A64_W13, A64_W19, off_dst);       /* STRH keeps low 16 */
+
+        emit_ldrb_imm(e, A64_W10, A64_W19, OFF_F);
+        emit_movz_w32(e, A64_W12, Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV, 0);
+        emit_and_w32(e, A64_W10, A64_W10, A64_W12);
+        emit_lsr_w32_imm(e, A64_W12, A64_W13, 16);         /* C: sum bit 16 -> bit 0 */
+        emit_orr_w32(e, A64_W10, A64_W10, A64_W12);
+        emit_eor_w32(e, A64_W12, A64_W9, A64_W11);         /* H: (a^b^sum) bit 12 */
+        emit_eor_w32(e, A64_W12, A64_W12, A64_W13);
+        emit_lsr_w32_imm(e, A64_W12, A64_W12, 8);          /*   -> bit 4 (FLAG_H) */
+        (void)emit_and_w32_imm(e, A64_W12, A64_W12, Z80_FLAG_H);
+        emit_orr_w32(e, A64_W10, A64_W10, A64_W12);
+        emit_lsr_w32_imm(e, A64_W12, A64_W13, 8);          /* XY from result.hi */
+        emit_movz_w32(e, A64_W14, Z80_FLAG_5 | Z80_FLAG_3, 0);
+        emit_and_w32(e, A64_W12, A64_W12, A64_W14);
+        emit_orr_w32(e, A64_W10, A64_W10, A64_W12);
+        emit_strb_imm(e, A64_W10, A64_W19, OFF_F);
+        return OP_SETS_F_INLINE;
+    }
+
+    /* ---- Accumulator rotates. All four share the flag rule:
+     *   F = (F & (S|Z|PV)) | carry_out | (A' & (5|3))    (H=0, N=0)
+     * NB: the interp does NOT set q for these (unlike every other
+     * F-writing op), so we return plain OP_FALL_THROUGH — if one of
+     * these is the last op in a block the tail stores q=0, matching. */
+    case Z80_OP_RLCA:
+    case Z80_OP_RRCA:
+    case Z80_OP_RLA:
+    case Z80_OP_RRA: {
+        emit_ldrb_imm(e, A64_W9,  A64_W19, OFF_A);
+        emit_ldrb_imm(e, A64_W11, A64_W19, OFF_F);
+        switch (dec->type) {
+        case Z80_OP_RLCA:                      /* A = A<<1 | A.7 ; C = A.7 */
+            emit_lsr_w32_imm(e, A64_W10, A64_W9, 7);
+            emit_lsl_w32_imm(e, A64_W9, A64_W9, 1);
+            emit_orr_w32(e, A64_W9, A64_W9, A64_W10);
+            (void)emit_and_w32_imm(e, A64_W9, A64_W9, 0xFF);
+            break;
+        case Z80_OP_RRCA:                      /* A = A>>1 | A.0<<7 ; C = A.0 */
+            (void)emit_and_w32_imm(e, A64_W10, A64_W9, 1);
+            emit_lsr_w32_imm(e, A64_W9, A64_W9, 1);
+            emit_lsl_w32_imm(e, A64_W12, A64_W10, 7);
+            emit_orr_w32(e, A64_W9, A64_W9, A64_W12);
+            break;
+        case Z80_OP_RLA:                       /* A = A<<1 | C_in ; C = A.7 */
+            (void)emit_and_w32_imm(e, A64_W13, A64_W11, 1);
+            emit_lsr_w32_imm(e, A64_W10, A64_W9, 7);
+            emit_lsl_w32_imm(e, A64_W9, A64_W9, 1);
+            emit_orr_w32(e, A64_W9, A64_W9, A64_W13);
+            (void)emit_and_w32_imm(e, A64_W9, A64_W9, 0xFF);
+            break;
+        default:                               /* RRA: A = A>>1 | C_in<<7 ; C = A.0 */
+            (void)emit_and_w32_imm(e, A64_W13, A64_W11, 1);
+            (void)emit_and_w32_imm(e, A64_W10, A64_W9, 1);
+            emit_lsr_w32_imm(e, A64_W9, A64_W9, 1);
+            emit_lsl_w32_imm(e, A64_W12, A64_W13, 7);
+            emit_orr_w32(e, A64_W9, A64_W9, A64_W12);
+            break;
+        }
+        emit_strb_imm(e, A64_W9, A64_W19, OFF_A);
+        emit_movz_w32(e, A64_W12, Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV, 0);
+        emit_and_w32(e, A64_W11, A64_W11, A64_W12);
+        emit_orr_w32(e, A64_W11, A64_W11, A64_W10);        /* carry out */
+        emit_movz_w32(e, A64_W12, Z80_FLAG_5 | Z80_FLAG_3, 0);
+        emit_and_w32(e, A64_W12, A64_W9, A64_W12);
+        emit_orr_w32(e, A64_W11, A64_W11, A64_W12);        /* XY from A' */
+        emit_strb_imm(e, A64_W11, A64_W19, OFF_F);
+        return OP_FALL_THROUGH;
+    }
+
+    case Z80_OP_DAA:
+        emit_call_helper(e, (void *)(uintptr_t)z80_jit_daa);
+        return OP_MODIFIES_F;
+
     case Z80_OP_EX_DE_HL: {
         emit_ldrh_imm(e, A64_W9,  A64_W19, OFF_DE);
         emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
@@ -910,18 +1035,27 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after) {
         return OP_MODIFIES_F;
     }
 
-    case Z80_OP_INC_R: {
+    case Z80_OP_INC_R:
+    case Z80_OP_DEC_R: {
+        void *helper = (dec->type == Z80_OP_INC_R)
+                           ? (void *)(uintptr_t)z80_jit_inc8
+                           : (void *)(uintptr_t)z80_jit_dec8;
+        if (dec->reg1 == 6) {
+            /* INC/DEC (HL), unprefixed — same shape as the indexed
+             * *_HL_ind case but the address is just HL. */
+            emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
+            emit_guest_loadb_w9_at_w10(e);          /* W9 = old byte */
+            emit_mov_w32_w32(e, A64_W1, A64_W9);
+            emit_call_helper(e, helper);
+            emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);  /* helper clobbered W10 */
+            emit_mov_w32_w32(e, A64_W9, A64_W0);
+            emit_guest_storeb_w9_at_w10_smc(e);
+            return OP_MODIFIES_F;
+        }
         int off = reg8_offset_p(dec->reg1, dec->prefix);
         emit_ldrb_imm(e, A64_W1, A64_W19, (uint32_t)off);   /* W1 = old value */
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_inc8);
+        emit_call_helper(e, helper);
         emit_strb_imm(e, A64_W0, A64_W19, (uint32_t)off);   /* W0 = new value */
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_DEC_R: {
-        int off = reg8_offset_p(dec->reg1, dec->prefix);
-        emit_ldrb_imm(e, A64_W1, A64_W19, (uint32_t)off);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_dec8);
-        emit_strb_imm(e, A64_W0, A64_W19, (uint32_t)off);
         return OP_MODIFIES_F;
     }
 
@@ -1373,7 +1507,7 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     uint16_t pc = guest_pc;
     uint32_t insns = 0;
     int ended_by_branch = 0;
-    int last_modifies_f = 0;
+    int q_mode = Q_CLEAR;
 
     while (insns < MAX_BLOCK_INSNS) {
         z80_decoded dec;
@@ -1390,7 +1524,9 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
         }
 
         unsigned r = emit_op(&e, &dec, pc_after);
-        last_modifies_f = (r & OP_MODIFIES_F) != 0;
+        if      (r & OP_MODIFIES_F)    q_mode = Q_KEEP;
+        else if (r & OP_SETS_F_INLINE) q_mode = Q_SET;
+        else                           q_mode = Q_CLEAR;
         ended_by_branch = (r & OP_ENDS_BLOCK) != 0;
         insns++;
         pc = pc_after;
@@ -1400,16 +1536,12 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
 
     if (insns == 0) return NULL;
 
-    /* If the last op was a flag-helper call, leave cpu->q at the helper's
-     * value (1). Otherwise clear it so the next interp step's prev_q is 0. */
-    int clear_q = !last_modifies_f;
-
     /* If we ended on a branch, the op already wrote cpu->pc. Otherwise
      * the next PC is the straight-through fall-through value in `pc`. */
     if (ended_by_branch) {
-        emit_block_tail(&e, insns, clear_q);
+        emit_block_tail(&e, insns, q_mode);
     } else {
-        emit_block_epilogue(&e, pc, insns, clear_q);
+        emit_block_epilogue(&e, pc, insns, q_mode);
     }
 
     dbt->code_used = e.offset;

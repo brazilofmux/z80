@@ -30,6 +30,11 @@ void z80_jit_cp (z80_cpu_t *cpu, uint8_t b);   /* like SUB but A unchanged */
 uint8_t z80_jit_inc8(z80_cpu_t *cpu, uint8_t v);
 uint8_t z80_jit_dec8(z80_cpu_t *cpu, uint8_t v);
 
+/* DAA — decimal adjust A after BCD add/subtract. Reads C/H/N from
+ * cpu->f, rewrites A and all flags. Mirrors the Z80_OP_DAA case in
+ * core/z80_interp.c. */
+void z80_jit_daa(z80_cpu_t *cpu);
+
 /* CB-prefix rotate/shift family. Take val, return new val, set
  * C/S/Z/PV/X/Y from result (or shifted-out bit for C); H=0, N=0.
  * Mirrors the CB body of core/z80_interp.c. */

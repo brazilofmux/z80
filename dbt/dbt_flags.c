@@ -125,6 +125,37 @@ void z80_jit_cp(z80_cpu_t *cpu, uint8_t b) {
     cpu->q = 1;
 }
 
+/* DAA — byte-for-byte mirror of the interp's Z80_OP_DAA case. */
+void z80_jit_daa(z80_cpu_t *cpu) {
+    uint8_t a = cpu->a;
+    uint8_t fcin = cpu->f & Z80_FLAG_C;
+    uint8_t fhin = cpu->f & Z80_FLAG_H;
+    uint8_t fnin = cpu->f & Z80_FLAG_N;
+    uint8_t corr = 0;
+    uint8_t new_c = 0;
+
+    if ((a & 0x0F) > 9 || fhin) corr |= 0x06;
+    if (a > 0x99 || fcin)       { corr |= 0x60; new_c = Z80_FLAG_C; }
+
+    uint8_t new_a;
+    uint8_t new_h;
+    if (fnin) {
+        new_a = a - corr;
+        new_h = (fhin && (a & 0x0F) < 6) ? Z80_FLAG_H : 0;
+    } else {
+        new_a = a + corr;
+        new_h = ((a & 0x0F) > 9) ? Z80_FLAG_H : 0;
+    }
+
+    cpu->a = new_a;
+    uint8_t f = fnin | new_c | new_h | xy_from(new_a);
+    if (new_a == 0) f |= Z80_FLAG_Z;
+    if (new_a & 0x80) f |= Z80_FLAG_S;
+    f |= parity8(new_a);
+    cpu->f = f;
+    cpu->q = 1;
+}
+
 uint8_t z80_jit_inc8(z80_cpu_t *cpu, uint8_t v) {
     uint8_t res = (uint8_t)(v + 1);
     uint8_t f = (cpu->f & Z80_FLAG_C) | xy_from(res);
