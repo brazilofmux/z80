@@ -20,6 +20,30 @@ static inline uint8_t parity8(uint8_t v) {
     return (v & 1) ? 0 : Z80_FLAG_PV;
 }
 
+/* ---- Result-indexed flag tables, bound to X24 inside JIT blocks.
+ *
+ * Everything an 8-bit op's F byte needs that depends ONLY on the result
+ * byte lives here, so inline-emitted ALU code gets S/Z/XY (+parity, or
+ * +H/PV for INC/DEC) with a single LDRB instead of a helper call.
+ * Layout (dbt_flags.h): LOGIC +0, SZXY +256, INC +512, DEC +768. */
+uint8_t z80_f_tables[1024];
+
+void z80_flag_tables_init(void) {
+    for (int r = 0; r < 256; r++) {
+        uint8_t szxy = xy_from((uint8_t)r);
+        if (r == 0)     szxy |= Z80_FLAG_Z;
+        if (r & 0x80)   szxy |= Z80_FLAG_S;
+        z80_f_tables[FT_LOGIC + r] = szxy | parity8((uint8_t)r);
+        z80_f_tables[FT_SZXY  + r] = szxy;
+        z80_f_tables[FT_INC   + r] = szxy
+            | (((r & 0xF) == 0x0) ? Z80_FLAG_H  : 0)
+            | ((r == 0x80)        ? Z80_FLAG_PV : 0);
+        z80_f_tables[FT_DEC   + r] = szxy | Z80_FLAG_N
+            | (((r & 0xF) == 0xF) ? Z80_FLAG_H  : 0)
+            | ((r == 0x7F)        ? Z80_FLAG_PV : 0);
+    }
+}
+
 void z80_jit_add(z80_cpu_t *cpu, uint8_t b) {
     uint8_t a = cpu->a;
     uint8_t res = (uint8_t)(a + b);

@@ -14,7 +14,24 @@
 #include "../core/z80.h"
 #include <stdint.h>
 
-/* 8-bit ALU writing A. ADC/SBC also read the carry input from cpu->f. */
+/* Result-indexed flag tables for inline-emitted ALU flag code. The
+ * trampoline binds X24 to z80_f_tables so a translated op can fetch
+ * the result-dependent flag bits with one LDRB [X24, res(+seg)].
+ *   LOGIC : S|Z|XY|parity          (AND/OR/XOR; AND additionally ORs H)
+ *   SZXY  : S|Z|XY                 (ADD/ADC/SUB/SBC/CP skeleton)
+ *   INC   : S|Z|XY|H(nib==0)|PV(res==0x80)          — OR in old C
+ *   DEC   : S|Z|XY|N|H(nib==0xF)|PV(res==0x7F)      — OR in old C */
+#define FT_LOGIC   0
+#define FT_SZXY  256
+#define FT_INC   512
+#define FT_DEC   768
+extern uint8_t z80_f_tables[1024];
+void z80_flag_tables_init(void);
+
+/* 8-bit ALU writing A. ADC/SBC also read the carry input from cpu->f.
+ * NOTE: the AArch64 backend now emits these inline (see emit_alu_inline
+ * in dbt_a64.c); the helpers remain as the reference implementation and
+ * for future backends. */
 void z80_jit_add(z80_cpu_t *cpu, uint8_t b);
 void z80_jit_adc(z80_cpu_t *cpu, uint8_t b);
 void z80_jit_sub(z80_cpu_t *cpu, uint8_t b);

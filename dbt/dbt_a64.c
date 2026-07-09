@@ -11,6 +11,7 @@
  *   X21 = block cache base      (unused until chaining)
  *   X22 = saved LR              (BLR to flag helpers clobbers X30)
  *   X23 = code_bitmap base      (inlined SMC fast-path check on stores)
+ *   X24 = z80_f_tables base     (result-indexed flag bytes, dbt_flags.h)
  *   X9 / X10 / X11 / X12 = scratch
  *
  * Block ABI: block updates cpu->pc and cpu->insn_count, then RETs back
@@ -45,7 +46,7 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
      *   [SP+ 0] FP, LR
      *   [SP+16] X19, X20
      *   [SP+32] X21, X22
-     *   [SP+48] X23, X24       (X24 unused but STP wants a pair) */
+     *   [SP+48] X23, X24       (X24 = flag-table base) */
     emit_stp_pre_sp (&e, A64_W29, A64_W30, -64);
     emit_stp_x64_off(&e, A64_W19, A64_W20, A64_SP, 16);
     emit_stp_x64_off(&e, A64_W21, A64_W22, A64_SP, 32);
@@ -56,6 +57,7 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
     emit_mov_x64_x64(&e, A64_W20, A64_W1);   /* X20 = mem  */
     emit_mov_x64_x64(&e, A64_W21, A64_W3);   /* X21 = cache base */
     emit_mov_x64_x64(&e, A64_W23, A64_W4);   /* X23 = code_bitmap base */
+    emit_mov_x64_x64(&e, A64_W24, A64_W5);   /* X24 = z80_f_tables base */
 
     /* BLR into the block (pointer in X2). The block's RET returns here. */
     emit_blr(&e, A64_W2);
@@ -387,6 +389,130 @@ static void emit_call_helper(emit_t *e, void *helper_addr) {
     emit_blr(e, A64_W9);
 }
 
+/* ----------------------------------------------------------------------
+ * Inline 8-bit ALU — no helper call, no scratch-clobber reloads.
+ *
+ * Contract: operand b is in W1 (same convention the old helper calls
+ * used); A is loaded from / stored to the context here. F is fully
+ * assembled inline: the result-only bits (S/Z/XY, +parity for logic
+ * ops) come from one LDRB off the X24 flag-table base; H rides the
+ * carry-recovery identity (bit 4 of a^b^res holds the carry into bit 4
+ * for add AND the borrow for sub, with or without carry-in); C is bit 8
+ * of the 32-bit result; V is the classic sign-xor formula.
+ * Clobbers W9-W15. Callers return OP_SETS_F_INLINE.
+ * ---------------------------------------------------------------------- */
+enum {
+    ALU_ADD, ALU_ADC, ALU_SUB, ALU_SBC, ALU_AND, ALU_OR, ALU_XOR, ALU_CP
+};
+
+static void emit_alu_inline(emit_t *e, int op) {
+    emit_ldrb_imm(e, A64_W9, A64_W19, OFF_A);              /* W9 = a */
+
+    if (op == ALU_AND || op == ALU_OR || op == ALU_XOR) {
+        if (op == ALU_AND)      emit_and_w32(e, A64_W14, A64_W9, A64_W1);
+        else if (op == ALU_OR)  emit_orr_w32(e, A64_W14, A64_W9, A64_W1);
+        else                    emit_eor_w32(e, A64_W14, A64_W9, A64_W1);
+        emit_strb_imm(e, A64_W14, A64_W19, OFF_A);
+        emit_ldrb_reg_uxtw(e, A64_W10, A64_W24, A64_W14);  /* FT_LOGIC + res */
+        if (op == ALU_AND)
+            (void)emit_orr_w32_imm(e, A64_W10, A64_W10, Z80_FLAG_H);
+        emit_strb_imm(e, A64_W10, A64_W19, OFF_F);
+        return;
+    }
+
+    int is_sub = (op == ALU_SUB || op == ALU_SBC || op == ALU_CP);
+
+    /* W13 = wide result (carry/borrow lives at bit 8). */
+    if (op == ALU_ADC || op == ALU_SBC) {
+        emit_ldrb_imm(e, A64_W11, A64_W19, OFF_F);
+        (void)emit_and_w32_imm(e, A64_W11, A64_W11, Z80_FLAG_C);
+        if (is_sub) {
+            emit_sub_w32(e, A64_W13, A64_W9, A64_W1);
+            emit_sub_w32(e, A64_W13, A64_W13, A64_W11);
+        } else {
+            emit_add_w32(e, A64_W13, A64_W9, A64_W1);
+            emit_add_w32(e, A64_W13, A64_W13, A64_W11);
+        }
+    } else if (is_sub) {
+        emit_sub_w32(e, A64_W13, A64_W9, A64_W1);
+    } else {
+        emit_add_w32(e, A64_W13, A64_W9, A64_W1);
+    }
+    (void)emit_and_w32_imm(e, A64_W14, A64_W13, 0xFF);     /* W14 = res8 */
+    if (op != ALU_CP)
+        emit_strb_imm(e, A64_W14, A64_W19, OFF_A);
+
+    /* F skeleton: S|Z|XY from the result byte. */
+    emit_add_w32_imm(e, A64_W12, A64_W14, FT_SZXY);
+    emit_ldrb_reg_uxtw(e, A64_W10, A64_W24, A64_W12);
+    if (op == ALU_CP) {
+        /* CP quirk: XY comes from the OPERAND, not the result. */
+        emit_movz_w32(e, A64_W12, 0xFF & ~(Z80_FLAG_5 | Z80_FLAG_3), 0);
+        emit_and_w32(e, A64_W10, A64_W10, A64_W12);
+        emit_movz_w32(e, A64_W12, Z80_FLAG_5 | Z80_FLAG_3, 0);
+        emit_and_w32(e, A64_W12, A64_W1, A64_W12);
+        emit_orr_w32(e, A64_W10, A64_W10, A64_W12);
+    }
+
+    /* H: bit 4 of (a ^ b ^ wide_res). */
+    emit_eor_w32(e, A64_W12, A64_W9, A64_W1);
+    emit_eor_w32(e, A64_W12, A64_W12, A64_W13);
+    (void)emit_and_w32_imm(e, A64_W12, A64_W12, Z80_FLAG_H);
+    emit_orr_w32(e, A64_W10, A64_W10, A64_W12);
+
+    /* C: bit 8 of the wide result (borrow sign-extends, so mask). */
+    emit_lsr_w32_imm(e, A64_W12, A64_W13, 8);
+    (void)emit_and_w32_imm(e, A64_W12, A64_W12, 1);
+    emit_orr_w32(e, A64_W10, A64_W10, A64_W12);
+
+    /* V -> PV (bit 2): add: (~(a^b) & (a^res)).7 ; sub: ((a^b) & (a^res)).7 */
+    emit_eor_w32(e, A64_W12, A64_W9, A64_W1);
+    if (!is_sub)
+        emit_mvn_w32(e, A64_W12, A64_W12);   /* high garbage ANDed away below */
+    emit_eor_w32(e, A64_W15, A64_W9, A64_W14);
+    emit_and_w32(e, A64_W12, A64_W12, A64_W15);
+    emit_lsr_w32_imm(e, A64_W12, A64_W12, 7);
+    emit_lsl_w32_imm(e, A64_W12, A64_W12, 2);
+    emit_orr_w32(e, A64_W10, A64_W10, A64_W12);
+
+    if (is_sub)
+        (void)emit_orr_w32_imm(e, A64_W10, A64_W10, Z80_FLAG_N);
+
+    emit_strb_imm(e, A64_W10, A64_W19, OFF_F);
+}
+
+/* Map a decoded ALU op type (any of the _R / _N / _HL_ind forms) to
+ * its ALU_* code. */
+static int alu_op_for(int type) {
+    switch (type) {
+    case Z80_OP_ADD_A_R: case Z80_OP_ADD_A_N: case Z80_OP_ADD_A_HL_ind: return ALU_ADD;
+    case Z80_OP_ADC_A_R: case Z80_OP_ADC_A_N: case Z80_OP_ADC_A_HL_ind: return ALU_ADC;
+    case Z80_OP_SUB_A_R: case Z80_OP_SUB_A_N: case Z80_OP_SUB_A_HL_ind: return ALU_SUB;
+    case Z80_OP_SBC_A_R: case Z80_OP_SBC_A_N: case Z80_OP_SBC_A_HL_ind: return ALU_SBC;
+    case Z80_OP_AND_A_R: case Z80_OP_AND_A_N: case Z80_OP_AND_A_HL_ind: return ALU_AND;
+    case Z80_OP_OR_A_R:  case Z80_OP_OR_A_N:  case Z80_OP_OR_A_HL_ind:  return ALU_OR;
+    case Z80_OP_XOR_A_R: case Z80_OP_XOR_A_N: case Z80_OP_XOR_A_HL_ind: return ALU_XOR;
+    default:                                                            return ALU_CP;
+    }
+}
+
+/* Inline INC/DEC of an 8-bit value: W2 in (old value), W9 out (new
+ * value). C is preserved from the current F; everything else comes
+ * from the FT_INC / FT_DEC table row. W10 is NOT touched, so memory
+ * forms can keep the effective address live across the flag update.
+ * Clobbers W11-W13. */
+static void emit_incdec8_inline(emit_t *e, int is_inc) {
+    if (is_inc) emit_add_w32_imm(e, A64_W9, A64_W2, 1);
+    else        emit_sub_w32_imm(e, A64_W9, A64_W2, 1);
+    (void)emit_and_w32_imm(e, A64_W9, A64_W9, 0xFF);
+    emit_add_w32_imm(e, A64_W12, A64_W9, is_inc ? FT_INC : FT_DEC);
+    emit_ldrb_reg_uxtw(e, A64_W11, A64_W24, A64_W12);
+    emit_ldrb_imm(e, A64_W13, A64_W19, OFF_F);
+    (void)emit_and_w32_imm(e, A64_W13, A64_W13, Z80_FLAG_C);
+    emit_orr_w32(e, A64_W11, A64_W11, A64_W13);
+    emit_strb_imm(e, A64_W11, A64_W19, OFF_F);
+}
+
 /* Bitfield returned by emit_op so the translator knows what the op did. */
 #define OP_FALL_THROUGH 0x0
 #define OP_ENDS_BLOCK   0x1     /* op wrote cpu->pc and the block must end */
@@ -711,20 +837,12 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
          * (IX|IY)+d under DD/FD. The store goes through the SMC helper
          * since the byte we just modified might be code. */
         int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
-        void *helper = (dec->type == Z80_OP_INC_HL_ind)
-                           ? (void *)(uintptr_t)z80_jit_inc8
-                           : (void *)(uintptr_t)z80_jit_dec8;
         if (idx) emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
         else     emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
-        emit_guest_loadb_w9_at_w10(e);          /* W9 = old byte */
-        emit_mov_w32_w32(e, A64_W1, A64_W9);
-        emit_call_helper(e, helper);
-        /* helper returns new value in W0; addr W10 was clobbered. Reload. */
-        if (idx) emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
-        else     emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
-        emit_mov_w32_w32(e, A64_W9, A64_W0);
-        emit_guest_storeb_w9_at_w10_smc(e);
-        return OP_MODIFIES_F;
+        emit_ldrb_reg_uxtw(e, A64_W2, A64_W20, A64_W10);    /* W2 = old byte */
+        emit_incdec8_inline(e, dec->type == Z80_OP_INC_HL_ind);
+        emit_guest_storeb_w9_at_w10_smc(e);                 /* W10 still live */
+        return OP_SETS_F_INLINE;
     }
     case Z80_OP_ADD_A_HL_ind:
     case Z80_OP_ADC_A_HL_ind:
@@ -736,20 +854,8 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
     case Z80_OP_CP_A_HL_ind:  {
         emit_idx_eff_addr(e, A64_W10, dec->prefix, (int8_t)dec->disp);
         emit_ldrb_reg_uxtw(e, A64_W1, A64_W20, A64_W10);
-        void *helper;
-        switch (dec->type) {
-        case Z80_OP_ADD_A_HL_ind: helper = (void *)z80_jit_add; break;
-        case Z80_OP_ADC_A_HL_ind: helper = (void *)z80_jit_adc; break;
-        case Z80_OP_SUB_A_HL_ind: helper = (void *)z80_jit_sub; break;
-        case Z80_OP_SBC_A_HL_ind: helper = (void *)z80_jit_sbc; break;
-        case Z80_OP_AND_A_HL_ind: helper = (void *)z80_jit_and; break;
-        case Z80_OP_OR_A_HL_ind:  helper = (void *)z80_jit_or;  break;
-        case Z80_OP_XOR_A_HL_ind: helper = (void *)z80_jit_xor; break;
-        case Z80_OP_CP_A_HL_ind:  helper = (void *)z80_jit_cp;  break;
-        default: helper = NULL;
-        }
-        emit_call_helper(e, helper);
-        return OP_MODIFIES_F;
+        emit_alu_inline(e, alu_op_for(dec->type));
+        return OP_SETS_F_INLINE;
     }
 
     case Z80_OP_LD_A_BC: {
@@ -1046,110 +1152,40 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
         return OP_FALL_THROUGH;
     }
 
-    /* ---- 8-bit ALU. Helpers in dbt_flags.c do the actual flag math. */
-    case Z80_OP_ADD_A_R: {
+    /* ---- 8-bit ALU, emitted inline (emit_alu_inline). Operand -> W1
+     * first, exactly like the old helper-call convention. */
+    case Z80_OP_ADD_A_R: case Z80_OP_ADC_A_R: case Z80_OP_SUB_A_R:
+    case Z80_OP_SBC_A_R: case Z80_OP_AND_A_R: case Z80_OP_OR_A_R:
+    case Z80_OP_XOR_A_R: case Z80_OP_CP_A_R: {
         emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_add);
-        return OP_MODIFIES_F;
+        emit_alu_inline(e, alu_op_for(dec->type));
+        return OP_SETS_F_INLINE;
     }
-    case Z80_OP_ADD_A_N: {
+    case Z80_OP_ADD_A_N: case Z80_OP_ADC_A_N: case Z80_OP_SUB_A_N:
+    case Z80_OP_SBC_A_N: case Z80_OP_AND_A_N: case Z80_OP_OR_A_N:
+    case Z80_OP_XOR_A_N: case Z80_OP_CP_A_N: {
         emit_movz_w32(e, A64_W1, dec->imm8, 0);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_add);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_ADC_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_adc);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_ADC_A_N: {
-        emit_movz_w32(e, A64_W1, dec->imm8, 0);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_adc);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_SUB_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_sub);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_SUB_A_N: {
-        emit_movz_w32(e, A64_W1, dec->imm8, 0);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_sub);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_SBC_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_sbc);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_SBC_A_N: {
-        emit_movz_w32(e, A64_W1, dec->imm8, 0);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_sbc);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_AND_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_and);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_AND_A_N: {
-        emit_movz_w32(e, A64_W1, dec->imm8, 0);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_and);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_OR_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_or);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_OR_A_N: {
-        emit_movz_w32(e, A64_W1, dec->imm8, 0);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_or);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_XOR_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_xor);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_XOR_A_N: {
-        emit_movz_w32(e, A64_W1, dec->imm8, 0);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_xor);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_CP_A_R: {
-        emit_alu_src_from_reg(e, dec->reg1, dec->prefix);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_cp);
-        return OP_MODIFIES_F;
-    }
-    case Z80_OP_CP_A_N: {
-        emit_movz_w32(e, A64_W1, dec->imm8, 0);
-        emit_call_helper(e, (void *)(uintptr_t)z80_jit_cp);
-        return OP_MODIFIES_F;
+        emit_alu_inline(e, alu_op_for(dec->type));
+        return OP_SETS_F_INLINE;
     }
 
     case Z80_OP_INC_R:
     case Z80_OP_DEC_R: {
-        void *helper = (dec->type == Z80_OP_INC_R)
-                           ? (void *)(uintptr_t)z80_jit_inc8
-                           : (void *)(uintptr_t)z80_jit_dec8;
+        int is_inc = (dec->type == Z80_OP_INC_R);
         if (dec->reg1 == 6) {
             /* INC/DEC (HL), unprefixed — same shape as the indexed
              * *_HL_ind case but the address is just HL. */
             emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);
-            emit_guest_loadb_w9_at_w10(e);          /* W9 = old byte */
-            emit_mov_w32_w32(e, A64_W1, A64_W9);
-            emit_call_helper(e, helper);
-            emit_ldrh_imm(e, A64_W10, A64_W19, OFF_HL);  /* helper clobbered W10 */
-            emit_mov_w32_w32(e, A64_W9, A64_W0);
+            emit_ldrb_reg_uxtw(e, A64_W2, A64_W20, A64_W10);
+            emit_incdec8_inline(e, is_inc);
             emit_guest_storeb_w9_at_w10_smc(e);
-            return OP_MODIFIES_F;
+            return OP_SETS_F_INLINE;
         }
         int off = reg8_offset_p(dec->reg1, dec->prefix);
-        emit_ldrb_imm(e, A64_W1, A64_W19, (uint32_t)off);   /* W1 = old value */
-        emit_call_helper(e, helper);
-        emit_strb_imm(e, A64_W0, A64_W19, (uint32_t)off);   /* W0 = new value */
-        return OP_MODIFIES_F;
+        emit_ldrb_imm(e, A64_W2, A64_W19, (uint32_t)off);   /* W2 = old value */
+        emit_incdec8_inline(e, is_inc);
+        emit_strb_imm(e, A64_W9, A64_W19, (uint32_t)off);   /* W9 = new value */
+        return OP_SETS_F_INLINE;
     }
 
     /* ---- CB-prefix: rotate/shift (sub<0x40), BIT (0x40..0x7F),

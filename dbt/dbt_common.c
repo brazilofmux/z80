@@ -20,6 +20,7 @@
  * as untranslatable, so it falls through to the interpreter, which
  * already knows how to dispatch the host shim. */
 #include "dbt.h"
+#include "dbt_flags.h"
 #include "../core/z80.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,7 @@ int dbt_init(z80_dbt_t *dbt, z80_cpu_t *cpu) {
     memset(dbt, 0, sizeof(*dbt));
     dbt->cpu = cpu;
     cpu->dbt = dbt;
+    z80_flag_tables_init();
     dbt_cache_invalidate_all(dbt);
 
     dbt->code_buf = mmap(NULL, CODE_BUF_SIZE,
@@ -129,7 +131,7 @@ static int verify_first_diff(const z80_cpu_t *jit, const z80_cpu_t *interp) {
  * arguments the backend trampoline expects. */
 typedef void (*trampoline_fn_t)(z80_cpu_t *cpu, uint8_t *mem,
                                 void *block, void *cache_base,
-                                void *bitmap_base);
+                                void *bitmap_base, void *flag_tables);
 
 int dbt_run(z80_dbt_t *dbt) {
     z80_cpu_t *cpu = dbt->cpu;
@@ -222,7 +224,8 @@ int dbt_run(z80_dbt_t *dbt) {
 
                 /* Run the JIT block on the real cpu/mem. */
                 dbt->jit_block_entries++;
-                trampoline(cpu, cpu->mem, code, dbt->cache, dbt->code_bitmap);
+                trampoline(cpu, cpu->mem, code, dbt->cache, dbt->code_bitmap,
+                           z80_f_tables);
 
                 uint64_t jit_insns = cpu->insn_count - insns_before;
                 z80_cpu_t post_jit = *cpu;
@@ -275,7 +278,8 @@ int dbt_run(z80_dbt_t *dbt) {
             }
 
             dbt->jit_block_entries++;
-            trampoline(cpu, cpu->mem, code, dbt->cache, dbt->code_bitmap);
+            trampoline(cpu, cpu->mem, code, dbt->cache, dbt->code_bitmap,
+                       z80_f_tables);
             continue;
         }
 
