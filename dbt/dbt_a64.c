@@ -408,7 +408,14 @@ enum { Q_CLEAR = 0, Q_KEEP = 1, Q_SET = 2 };
 /* Tail prologue: fix up cpu->q per the mode above and bump the pending
  * insn count in X25. Runs exactly once per block exit, BEFORE any edge
  * split — neither insn touches NZCV, so conditional enders can TST
- * before or after it. */
+ * before or after it.
+ *
+ * Don't bother shrinking this further: emitting NOTHING here (no q
+ * store, no count add) was measured at +2-3% on SQUARO and zexdoc
+ * (2026-07). That's the ceiling for any "sink q/count across chained
+ * edges" scheme — and a correct one must keep the count add for exact
+ * insn counts and would need cross-block q liveness that breaks -V's
+ * per-block architectural-state check. Not worth the invariant. */
 static void emit_tail_prologue(emit_t *e, uint32_t insn_count_delta, int q_mode) {
     if (q_mode == Q_CLEAR) {
         emit_strb_imm(e, A64_WZR, R_CPU, OFF_Q);
