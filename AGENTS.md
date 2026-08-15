@@ -5,6 +5,7 @@
 This is a **play project** with an absurd performance goal: make a Z80 + CP/M system (Kaypro, WordStar, etc.) run at 2–10+ billion instructions per second on modern hosts.
 
 We are allowed (encouraged) to:
+
 - Go completely overboard on micro-optimizations in the DBT
 - Special-case the hell out of real applications (WordStar screen loops, dBASE B-tree walks, etc.)
 - Mix "authentic emulation" with "cheat for speed" (e.g., host-accelerated block moves, native file I/O, modern clipboard in a CP/M app)

@@ -59,6 +59,7 @@ typedef struct {
 ```
 
 **Register caching strategy** (the key to BIPS — SHIPPED on AArch64):
+
 - BC/DE/HL/SP/A/F are pinned in callee-saved host registers
   (X21/X22/X23/X26/X27/X28) across blocks AND block chains; X24 holds a
   single aux base serving flag tables, the SMC bitmap, and the block
@@ -84,16 +85,19 @@ block exits). The emitters skip the dead chunks — ADD before ADD emits no
 flag code at all; ADD before JR C emits only the carry. What survives is
 built inline from result-indexed tables (`z80_f_tables`) plus identities
 (carry-recovery for H, sign-xor for V). Two rules that keep it sound:
+
 - fmask is the LIVE-OUT mask, not live∩write — pass-through ops (INC
   preserves C, rotates preserve S/Z/PV) must see live bits outside their
   own write set;
 - q/prev_q semantics stay ARCHITECTURAL even for fully-elided ops, and
   SCF/CCF classify as read-all so their XY-quirk inputs always materialize.
+
 Block exits mark all bits live, so `-V` lockstep verification stays exact.
 
 ## Block Chaining & Control Flow
 
 Same pattern as riscv/dbt:
+
 - Every translated block ends by looking up `cache[ (next_pc >> 2) & MASK ]` (adapted for Z80 byte addressing).
 - Direct jump if the target is already hot (chaining).
 - Inline cache probe for speed.
@@ -114,6 +118,7 @@ When the DBT sees a tight loop containing only these, we can even replace the en
 ## Kaypro Personality
 
 Classic Kaypro video:
+
 - 80 columns × 24 rows
 - Character generator ROM (we can embed a dump or use CP/M 3.0 "character attributes")
 - Escape sequences for cursor, clear, reverse video, etc.
