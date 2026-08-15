@@ -37,3 +37,6 @@ callgrind.out.*
 # Commercial CP/M software stays local — bring your own copies.
 disks/zork1/
 disks/mscobol/
+
+# mdfix -i backups
+*.bak
