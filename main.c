@@ -9,12 +9,30 @@
 #include <termios.h>
 #include <unistd.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <dirent.h>
 #include <limits.h>
 
 static struct termios orig_termios;
 static int term_raw = 0;
 int trace_block_ops = 0;
+
+/* Anything reported at exit must land on the host's normal screen, not
+ * the Kaypro alternate screen (which shutdown discards). Idempotent, so
+ * the exit paths call it freely and atexit's shutdown becomes a no-op. */
+static void leave_kaypro_screen(void) {
+    kaypro_render_tty_flush(0);
+    kaypro_render_tty_shutdown();
+}
+
+/* stderr note on the way out (exit status, errors). */
+static void exit_note(const char *fmt, ...) {
+    leave_kaypro_screen();
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
 
 /* ---- Host events. Signals only set a flag; the run loops notice it
  * between blocks (JIT) or instructions (interp) and call
@@ -33,8 +51,8 @@ static void host_event_dispatch(z80_cpu_t *cpu) {
     g_pending_signals = 0;
     if (pending & (1u << SIGINT)) {
         /* Clean exit path: atexit restores the terminal. */
-        fprintf(stderr, "\n[exit] interrupted after %llu insns\n",
-                (unsigned long long)cpu->insn_count);
+        exit_note("\n[exit] interrupted after %llu insns\n",
+                  (unsigned long long)cpu->insn_count);
         exit(130);
     }
     if (pending & (1u << SIGWINCH)) {
@@ -279,9 +297,9 @@ int main(int argc, char **argv) {
         used_jit = 1;
         int rc = dbt_run(dbt);
         if (rc < 0) {
-            fprintf(stderr, "[exit] DBT stopped with error at PC=%04X\n", cpu.pc);
+            exit_note("[exit] DBT stopped with error at PC=%04X\n", cpu.pc);
         } else {
-            fprintf(stderr, "[exit] DBT clean after %llu insns\n",
+            exit_note("[exit] DBT clean after %llu insns\n",
                     (unsigned long long)cpu.insn_count);
         }
     } else {
@@ -290,7 +308,7 @@ int main(int argc, char **argv) {
             /* Direct termination conditions (very common in real .COMs) */
             if (cpu.pc == 0 && cpu.insn_count > 4) {
                 /* Classic CP/M termination: JP 0, RET to 0 on stack, etc. */
-                fprintf(stderr, "[exit] PC=0000 after %llu insns (RET/JP 0 warmboot)\n",
+                exit_note("[exit] PC=0000 after %llu insns (RET/JP 0 warmboot)\n",
                         (unsigned long long)cpu.insn_count);
                 break;
             }
@@ -302,12 +320,12 @@ int main(int argc, char **argv) {
 
             int rc = z80_step(&cpu);
             if (rc < 0) {
-                fprintf(stderr, "CPU stopped with error at PC=%04X\n", cpu.pc);
+                exit_note("CPU stopped with error at PC=%04X\n", cpu.pc);
                 break;
             }
             if (rc > 0) {
                 /* Clean CP/M exit via BDOS 0 / WBOOT / BIOS WBOOT */
-                fprintf(stderr, "[exit] BDOS/BIOS warmboot after %llu insns (C=%02X)\n",
+                exit_note("[exit] BDOS/BIOS warmboot after %llu insns (C=%02X)\n",
                         (unsigned long long)cpu.insn_count, cpu.c);
                 break;
             }
@@ -317,13 +335,15 @@ int main(int argc, char **argv) {
                         cpu.hl, cpu.de, cpu.bc, cpu.af, cpu.ix, cpu.iy);
             }
             if (cpu.insn_count > 50000000000ULL) {
-                fprintf(stderr, "Safety limit (50B insns) reached — bug or wait?\n");
+                exit_note("Safety limit (50B insns) reached — bug or wait?\n");
                 break;
             }
         }
     }
 
-    kaypro_render_tty_flush(0);
+    /* Off the alternate screen before the dump and the stats, so they
+     * are actually visible when stdout is the terminal. */
+    leave_kaypro_screen();
 
     if (kaypro_term && screen_dump) {
         FILE *sf = strcmp(screen_dump, "-") == 0 ? stdout : fopen(screen_dump, "w");

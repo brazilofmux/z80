@@ -66,10 +66,27 @@ clean:
 	rm -f tools/mkhello tools/mkblock
 	rm -f tests/*.com tests/*.bin
 
-# Placeholder test target — will expand when we have .COM tests
-test: test-video test-render
-	@echo "No guest tests yet — the monster is still in the larval stage."
-	@echo "Soon: ./$(TARGET) -i tests/hello.com && ./$(TARGET) -V tests/hello.com"
+test: test-video test-render test-guest
+
+# Guest-side tests: the generated .COMs under the interpreter, the JIT,
+# and lockstep verify. ports.com is the Phase 0 acceptance test (every
+# port op traps, so all three modes exercise the same interpreter path).
+GUEST_TESTS = tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/ports.com
+.PHONY: test-guest
+test-guest: $(TARGET) $(GUEST_TESTS)
+	@fail=0; \
+	for mode in -i -j -V; do \
+	    out=$$(./$(TARGET) $$mode tests/ports.com 2>&1 | tr -d '\000'); \
+	    case "$$out" in *"PORT I/O OK"*) echo "ports.com $$mode: ok" ;; \
+	        *) echo "ports.com $$mode: FAIL"; fail=1 ;; esac; \
+	done; \
+	for t in hello block cb ix; do \
+	    out=$$(./$(TARGET) -V tests/$$t.com 2>&1 | tr -d '\000'); \
+	    case "$$out" in *divergence*|*"lockstep broken"*|*"stopped with error"*) \
+	        echo "$$t.com -V: FAIL"; fail=1 ;; \
+	        *) echo "$$t.com -V: ok" ;; esac; \
+	done; \
+	[ $$fail -eq 0 ] && echo "test-guest: all pass" || { echo "test-guest: FAILURES"; exit 1; }
 
 # Host-side unit test of the Kaypro screen model (no Z80 involved).
 .PHONY: test-video

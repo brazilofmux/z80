@@ -15,7 +15,6 @@ static FILE *out;                       /* NULL until set; defaults to stdout */
 static int   active;
 static kaypro_cell_t shadow[KV_ROWS][KV_COLS];
 static int   shadow_valid;              /* 0 => next flush paints everything */
-static int   shadow_cur_row = -1, shadow_cur_col = -1, shadow_cursor_visible = -1;
 static struct timespec last_paint;
 
 #define FRAME_NS 16000000L              /* ~60 Hz cap on repaints during bursts */
@@ -33,7 +32,6 @@ void kaypro_render_tty_init(void) {
     fputs("\033[?1049h\033[0m\033[2J\033[H\033[?25l", f);
     fflush(f);
     shadow_valid = 0;
-    shadow_cur_row = shadow_cur_col = shadow_cursor_visible = -1;
     clock_gettime(CLOCK_MONOTONIC, &last_paint);
     active = 1;
 }
@@ -147,8 +145,6 @@ void kaypro_render_tty_flush(int force) {
      * visibility. */
     emit_goto(f, v->cur_row, v->cur_col);
     if (v->cursor_visible) fputs("\033[?25h", f);
-    shadow_cur_row = v->cur_row; shadow_cur_col = v->cur_col;
-    shadow_cursor_visible = v->cursor_visible;
 
     fflush(f);
     shadow_valid = 1;
