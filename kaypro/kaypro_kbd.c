@@ -14,6 +14,7 @@
 static uint8_t  queue[QSIZE];
 static unsigned q_head, q_tail;          /* push at head, pop at tail */
 static int q_empty(void) { return q_head == q_tail; }
+static int q_full(void)  { return (q_head + 1) % QSIZE == q_tail; }
 static void q_push(uint8_t c) {
     unsigned n = (q_head + 1) % QSIZE;
     if (n != q_tail) { queue[q_head] = c; q_head = n; }
@@ -69,6 +70,7 @@ typedef struct {
 
 static step_t  *steps;
 static size_t   n_steps, cap_steps, cur_step;
+static size_t   step_off;                /* ST_BYTES: bytes already queued */
 static long     idle_target;             /* ST_WAIT_IDLE: polls still needed */
 static int      idle_armed;
 
@@ -166,8 +168,10 @@ static int script_advance(int reading) {
         step_t *s = &steps[cur_step];
         switch (s->kind) {
         case ST_BYTES:
-            for (size_t i = 0; i < s->len; i++) q_push(s->bytes[i]);
-            cur_step++;
+            /* The queue holds QSIZE-1 bytes; a long line is fed in as
+             * many pieces as it takes, so nothing is dropped. */
+            while (step_off < s->len && !q_full()) q_push(s->bytes[step_off++]);
+            if (step_off == s->len) { step_off = 0; cur_step++; }
             return 1;
         case ST_WAIT_IDLE:
             if (!idle_armed) { idle_armed = 1; idle_target = s->arg; }
@@ -231,6 +235,14 @@ int kaypro_kbd_read(void) {
 
 void kaypro_kbd_wait(void) {
     if (!q_empty()) return;
-    if (scripted) { script_advance(1); return; }
+    if (scripted) {
+        if (script_advance(1) < 0) {
+            /* Script over and the guest is idling in HALT: nothing will
+             * ever wake it. End the session as a blocking read would. */
+            fprintf(stderr, "[exit] script ended, guest halted\n");
+            exit(0);
+        }
+        return;
+    }
     host_fetch(1);
 }
