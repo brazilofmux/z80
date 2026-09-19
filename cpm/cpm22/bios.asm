@@ -41,7 +41,7 @@ p_dmal	equ	0EDh		; OUT: DMA low
 p_dmah	equ	0EEh		; OUT: DMA high
 p_cmd	equ	0EFh		; OUT: 0 read, 1 write / IN: 0 ok, 1 error
 
-ndrives	equ	4		; A: to D:
+ndrives	equ	8		; A: to H: (a batch job wants work and scratch drives)
 
 	org	bios
 
@@ -201,10 +201,10 @@ dph:	dphm	0
 	dphm	1
 	dphm	2
 	dphm	3
-
-dirbuf:	ds	128
-alvsz	equ	256		; (DSM/8)+1 for the hard disk
-alv:	ds	ndrives*alvsz
+	dphm	4
+	dphm	5
+	dphm	6
+	dphm	7
 
 ; 8 MB "hard disk": 1024 tracks x 64 records, 4K blocks, 1024 directory
 ; entries, 2 system tracks. cpmtools diskdef z80m-hd in tools/diskdefs.
@@ -225,6 +225,12 @@ dpb_fd:	dw	40
 	db	80h, 0		; 1 directory block
 	dw	0
 	dw	2
+
+; The uninitialised areas come last: the system image is cut at
+; the end of the initialised code and data (Makefile: f200-f9ff).
+dirbuf:	ds	128
+alvsz	equ	256		; (DSM/8)+1 for the hard disk
+alv:	ds	ndrives*alvsz
 
 biosend:
 	end
