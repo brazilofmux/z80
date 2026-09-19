@@ -202,6 +202,13 @@ int dbt_run(z80_dbt_t *dbt) {
     }
 
     for (;;) {
+        /* Host events (signals) are noticed here, between JIT runs and
+         * interp steps — never inside translated code. */
+        if (cpu->host_event) {
+            cpu->host_event = 0;
+            if (cpu->on_host_event) cpu->on_host_event(cpu);
+        }
+
         /* Mirror main.c's "RET to warm boot" termination check. */
         if (cpu->pc == 0 && cpu->insn_count > 4) {
             return 0;

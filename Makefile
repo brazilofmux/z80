@@ -28,7 +28,7 @@ endif
 
 # Core sources (will grow)
 CORE_SRCS = core/z80_decode.c core/z80_interp.c core/z80_state.c
-CPM_SRCS  = cpm/cpm_bdos.c cpm/cpm_bios.c cpm/cpm_loader.c cpm/cpm_disk.c
+CPM_SRCS  = cpm/cpm_bdos.c cpm/cpm_bios.c cpm/cpm_loader.c cpm/cpm_disk.c cpm/cpm_ports.c
 KAYPRO_SRCS = kaypro/kaypro_video.c kaypro/kaypro_kbd.c
 
 # DBT sources
@@ -129,8 +129,15 @@ tests/random.com: tools/mkrandom
 tools/mkrandom: tools/mkrandom.c
 	$(CC) -o $@ $<
 
+tests/ports.com: tools/mkports
+	@mkdir -p tests
+	./tools/mkports
+
+tools/mkports: tools/mkports.c
+	$(CC) -o $@ $<
+
 # Quick sanity: does it even compile and say hello?
-smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/console.com
+smoke: $(TARGET) tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/console.com tests/ports.com
 	@echo "=== Smoke test ==="
 	./$(TARGET) --version || true
 	@echo

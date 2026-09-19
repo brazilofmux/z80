@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <termios.h>
 #include <sys/select.h>
+#include <errno.h>
 #include <sys/time.h>
 #include <string.h>
 
@@ -279,4 +280,16 @@ void cpm_read_console_buffer(z80_cpu_t *cpu, uint16_t de) {
 
     buf[1] = len;
     cpu->a = 0;
+}
+
+void cpm_console_wait(void) {
+    if (queue_has_data()) return;
+    for (;;) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        int ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, NULL);
+        if (ret >= 0) return;          /* readable, or EOF (also readable) */
+        if (errno != EINTR) return;    /* give up rather than spin on an error */
+    }
 }

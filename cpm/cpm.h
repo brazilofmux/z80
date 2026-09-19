@@ -109,6 +109,16 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu);
 /* When non-zero, emit BDOS/BIOS startup tracing on stderr. Set by main.c -d. */
 extern int cpm_debug;
 
+/* Block until console input is available (HALT's wake-up), consuming
+ * nothing. Returns at once if the console input queue is non-empty. */
+void cpm_console_wait(void);
+
+/* Default port device (cpm_ports.c): installs cpu->port_in/port_out.
+ * A 256-byte latch — OUT stores, IN reads back what was last written to
+ * that port (0xFF if nothing) — plus port 0xF0 as a debug byte echoed
+ * to stderr under -d. Phase 2's BIOS port map replaces this. */
+void cpm_install_ports(z80_cpu_t *cpu);
+
 /* BIOS support */
 void cpm_install_bios(z80_cpu_t *cpu);
 int  cpm_bios_dispatch(z80_cpu_t *cpu);

@@ -122,7 +122,24 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
         case 0xB1: out->type = Z80_OP_CPIR; return out->bytes;
         case 0xB8: out->type = Z80_OP_LDDR; return out->bytes;
         case 0xB9: out->type = Z80_OP_CPDR; return out->bytes;
+        case 0xA2: out->type = Z80_OP_INI;  return out->bytes;
+        case 0xAA: out->type = Z80_OP_IND;  return out->bytes;
+        case 0xB2: out->type = Z80_OP_INIR; return out->bytes;
+        case 0xBA: out->type = Z80_OP_INDR; return out->bytes;
+        case 0xA3: out->type = Z80_OP_OUTI; return out->bytes;
+        case 0xAB: out->type = Z80_OP_OUTD; return out->bytes;
+        case 0xB3: out->type = Z80_OP_OTIR; return out->bytes;
+        case 0xBB: out->type = Z80_OP_OTDR; return out->bytes;
         default:
+            /* ED 40..7F with low bits 000/001: IN r,(C) / OUT (C),r.
+             * r == 6 is the undocumented IN (C) (flags only) and
+             * OUT (C),0. */
+            if ((op & 0xC7) == 0x40) {
+                out->type = Z80_OP_IN_R_C;  out->reg1 = (op >> 3) & 7; return out->bytes;
+            }
+            if ((op & 0xC7) == 0x41) {
+                out->type = Z80_OP_OUT_C_R; out->reg1 = (op >> 3) & 7; return out->bytes;
+            }
             out->type = Z80_OP_UNKNOWN;
             return out->bytes;
         }
@@ -564,6 +581,12 @@ const char *z80_op_name(z80_op_type t) {
     case Z80_OP_LD_NN_A: return "LD (nn),A";
     case Z80_OP_LD_A_NN: return "LD A,(nn)";
     case Z80_OP_OUT_N_A: return "OUT (n),A";
+    case Z80_OP_IN_R_C:  return "IN r,(C)";
+    case Z80_OP_OUT_C_R: return "OUT (C),r";
+    case Z80_OP_INI:  return "INI";  case Z80_OP_IND:  return "IND";
+    case Z80_OP_INIR: return "INIR"; case Z80_OP_INDR: return "INDR";
+    case Z80_OP_OUTI: return "OUTI"; case Z80_OP_OUTD: return "OUTD";
+    case Z80_OP_OTIR: return "OTIR"; case Z80_OP_OTDR: return "OTDR";
     default: return "???";
     }
 }

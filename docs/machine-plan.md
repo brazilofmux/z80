@@ -73,6 +73,18 @@ Acceptance: zexdoc/zexall still 67/67 under `-j` and `-V` on both
 backends; a test `.COM` that uses `OUT (C),r`, `OTIR`, and `IN A,(n)`
 against a scripted port table passes under `-i`, `-j`, `-V`.
 
+Status (2026-09-18, Linux/x86-64): landed. The hooks are
+`cpu->port_in` / `cpu->port_out` (with `high` = B or A); the whole ED
+family decodes and runs in the interpreter, repeating forms atomically
+like LDIR, with the documented final-iteration flags. `cpm/cpm_ports.c`
+is the placeholder device (a latch per port, 0xF0 as a `-d` debug
+byte) that `tests/ports.com` (`tools/mkports.c`) exercises. `HALT`
+blocks in `select()` on stdin via `cpm_console_wait()` — EOF counts as
+input so a headless run can't hang. `cpu->host_event` is set by
+SIGINT/SIGWINCH/SIGALRM and drained in `dbt_run` and the interp loop
+through `cpu->on_host_event`; today's handler makes ^C a clean exit
+that restores the terminal. Not yet verified on AArch64.
+
 ## Phase 1 — the Kaypro terminal
 
 The gate for WordStar. Lives in `kaypro/`; the `cpm/` console shims and

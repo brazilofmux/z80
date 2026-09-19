@@ -114,6 +114,21 @@ typedef struct z80_cpu {
     void     *jit_sp_base;
     uint32_t  jit_call_budget;
 
+    /* Host-event flag: set (from a signal handler) when the host wants
+     * the dispatcher's attention — HUD repaint, window resize, ^C. The
+     * run loops test it between blocks/instructions and call
+     * on_host_event with it cleared. Translated code never looks at it. */
+    volatile uint8_t host_event;
+    void (*on_host_event)(struct z80_cpu *cpu);
+
+    /* Port I/O hooks. `high` is the top address byte the Z80 puts on
+     * A8-A15: B for the (C) forms, A for IN A,(n) / OUT (n),A. NULL
+     * means an unconnected bus: IN reads 0xFF, OUT is dropped. Only the
+     * interpreter performs port I/O — the translators refuse every port
+     * op so it traps. */
+    uint8_t (*port_in)(struct z80_cpu *cpu, uint8_t port, uint8_t high);
+    void    (*port_out)(struct z80_cpu *cpu, uint8_t port, uint8_t high, uint8_t val);
+
     /* Back-pointer to the DBT state. Set by dbt_init when the JIT is in
      * use; NULL otherwise. JIT helpers (SMC invalidation, ...) reach the
      * dbt-side state via this. */
@@ -270,6 +285,13 @@ typedef enum {
     /* ED 67/6F: rotate-decimal between A's low nibble and (HL) */
     Z80_OP_RRD,
     Z80_OP_RLD,
+
+    /* ED-prefix port I/O family. reg1 = register code; 6 means the
+     * undocumented flag-only IN (C) / OUT (C),0 forms. */
+    Z80_OP_IN_R_C,      /* ED 40/48/.../78  IN r,(C) */
+    Z80_OP_OUT_C_R,     /* ED 41/49/.../79  OUT (C),r */
+    Z80_OP_INI,  Z80_OP_IND,  Z80_OP_INIR, Z80_OP_INDR,
+    Z80_OP_OUTI, Z80_OP_OUTD, Z80_OP_OTIR, Z80_OP_OTDR,
 } z80_op_type;
 
 typedef struct {

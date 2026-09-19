@@ -175,6 +175,76 @@ static inline int cond_true(z80_cpu_t *cpu, int cc) {
 /* ========================================================================
  * The actual step function
  * ===================================================================== */
+/* ---- Port I/O (see the hook comments in z80.h) ---- */
+
+static inline uint8_t io_in(z80_cpu_t *cpu, uint8_t port, uint8_t high) {
+    return cpu->port_in ? cpu->port_in(cpu, port, high) : 0xFF;
+}
+static inline void io_out(z80_cpu_t *cpu, uint8_t port, uint8_t high, uint8_t val) {
+    if (cpu->port_out) cpu->port_out(cpu, port, high, val);
+}
+
+/* 8-bit register by code 0..7 (B C D E H L - A) for the (C) forms. */
+static inline uint8_t io_read_r8(const z80_cpu_t *cpu, int r) {
+    switch (r) {
+    case 0: return cpu->b; case 1: return cpu->c; case 2: return cpu->d;
+    case 3: return cpu->e; case 4: return cpu->h; case 5: return cpu->l;
+    default: return cpu->a;
+    }
+}
+static inline void io_write_r8(z80_cpu_t *cpu, int r, uint8_t v) {
+    switch (r) {
+    case 0: cpu->b = v; break; case 1: cpu->c = v; break; case 2: cpu->d = v; break;
+    case 3: cpu->e = v; break; case 4: cpu->h = v; break; case 5: cpu->l = v; break;
+    default: cpu->a = v; break;
+    }
+}
+
+/* INI/IND/OUTI/OUTD and their repeating forms. Like LDIR, a repeating
+ * form runs to completion in one step (insn_count += 1), so the flags
+ * observable afterwards are the final iteration's — the ones the
+ * documented rules describe (B == 0):
+ *   S/Z/XY from B; N = bit 7 of the transferred byte;
+ *   k = byte + ((C +- 1) & 0xFF)  for INI/IND,  byte + L (after the
+ *       HL step) for OUTI/OUTD;
+ *   H = C = (k > 255); PV = parity((k & 7) ^ B).
+ * The port callback fires once per byte, in order, so a device sees
+ * exactly what the silicon would send. */
+static void io_block(z80_cpu_t *cpu, int type) {
+    int in   = (type == Z80_OP_INI || type == Z80_OP_IND || type == Z80_OP_INIR || type == Z80_OP_INDR);
+    int down = (type == Z80_OP_IND || type == Z80_OP_INDR || type == Z80_OP_OUTD || type == Z80_OP_OTDR);
+    int rep  = (type == Z80_OP_INIR || type == Z80_OP_INDR || type == Z80_OP_OTIR || type == Z80_OP_OTDR);
+    int step = down ? -1 : 1;
+    uint8_t v = 0;
+    unsigned k = 0;
+    do {
+        if (in) {
+            v = io_in(cpu, cpu->c, cpu->b);
+            cpu->memptr = (uint16_t)(cpu->bc + step);
+            z80_mem_w(cpu, cpu->hl, v);
+            cpu->b--;
+            cpu->hl = (uint16_t)(cpu->hl + step);
+            k = (unsigned)v + ((cpu->c + step) & 0xFF);
+        } else {
+            v = cpu->mem[cpu->hl];
+            cpu->b--;
+            io_out(cpu, cpu->c, cpu->b, v);
+            cpu->hl = (uint16_t)(cpu->hl + step);
+            cpu->memptr = (uint16_t)(cpu->bc + step);
+            k = (unsigned)v + cpu->l;
+        }
+    } while (rep && cpu->b != 0);
+
+    uint8_t f = xy_from(cpu->b);
+    if (cpu->b == 0)   f |= Z80_FLAG_Z;
+    if (cpu->b & 0x80) f |= Z80_FLAG_S;
+    if (v & 0x80)      f |= Z80_FLAG_N;
+    if (k > 255)       f |= Z80_FLAG_H | Z80_FLAG_C;
+    f |= parity8((uint8_t)((k & 7) ^ cpu->b));
+    cpu->f = f;
+    cpu->q = 1;
+}
+
 int z80_step(z80_cpu_t *cpu) {
     z80_decoded dec;
     int n = z80_decode_one(cpu->mem, cpu->pc, &dec);
@@ -544,10 +614,13 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_HALT:
-        /* No interrupt sources implemented — treat as terminate so we
-         * don't spin forever, but loud so we notice. */
-        fprintf(stderr, "z80_step: HALT at %04X (no IRQ system yet) — stopping\n", old_pc);
-        return -1;
+        /* No interrupt sources yet: HALT waits until console input is
+         * available (the only wake-up event a Kaypro program idles on),
+         * then continues at the next instruction. */
+        if (cpm_debug)
+            fprintf(stderr, "z80_step: HALT at %04X — waiting for console input\n", old_pc);
+        cpm_console_wait();
+        break;
 
     case Z80_OP_SUB_A_N:
         {
@@ -852,14 +925,42 @@ int z80_step(z80_cpu_t *cpu) {
         break;
 
     case Z80_OP_OUT_N_A:
-        /* For now we just ignore port writes (later the cpm/kaypro layer will catch some) */
-        (void)dec.imm8;
+        /* Port n, A on A8-A15. memptr = (A << 8) | ((n + 1) & 0xFF). */
+        io_out(cpu, dec.imm8, cpu->a, cpu->a);
+        cpu->memptr = (uint16_t)(((uint16_t)cpu->a << 8) | ((dec.imm8 + 1) & 0xFF));
         break;
 
-    case Z80_OP_IN_A_N:
-        /* Return 0xFF for now (typical for floating bus / unconnected ports) */
-        cpu->a = 0xFF;
-        (void)dec.imm8;
+    case Z80_OP_IN_A_N: {
+        /* memptr = ((A << 8) | n) + 1, with the OLD A. */
+        uint16_t addr = (uint16_t)(((uint16_t)cpu->a << 8) | dec.imm8);
+        cpu->a = io_in(cpu, dec.imm8, cpu->a);
+        cpu->memptr = (uint16_t)(addr + 1);
+        break;
+    }
+
+    case Z80_OP_IN_R_C: {
+        /* IN r,(C): port C, B on A8-A15. S/Z/PV(parity)/XY from the
+         * value, H=N=0, C preserved. r == 6 is the flags-only IN (C). */
+        uint8_t v = io_in(cpu, cpu->c, cpu->b);
+        cpu->memptr = (uint16_t)(cpu->bc + 1);
+        if (dec.reg1 != 6) io_write_r8(cpu, dec.reg1, v);
+        set_flags_logic(cpu, v);
+        cpu->f &= (uint8_t)~Z80_FLAG_H;   /* logic helper sets H for AND; IN has H=0 */
+        cpu->q = 1;
+        break;
+    }
+
+    case Z80_OP_OUT_C_R:
+        /* OUT (C),r; r == 6 is the undocumented OUT (C),0 (NMOS). */
+        io_out(cpu, cpu->c, cpu->b, dec.reg1 == 6 ? 0 : io_read_r8(cpu, dec.reg1));
+        cpu->memptr = (uint16_t)(cpu->bc + 1);
+        break;
+
+    case Z80_OP_INI:  case Z80_OP_IND:
+    case Z80_OP_INIR: case Z80_OP_INDR:
+    case Z80_OP_OUTI: case Z80_OP_OUTD:
+    case Z80_OP_OTIR: case Z80_OP_OTDR:
+        io_block(cpu, dec.type);
         break;
 
     case Z80_OP_LDIR:

@@ -6,12 +6,51 @@
 #include <stdlib.h>
 #include <termios.h>
 #include <unistd.h>
+#include <signal.h>
 #include <dirent.h>
 #include <limits.h>
 
 static struct termios orig_termios;
 static int term_raw = 0;
 int trace_block_ops = 0;
+
+/* ---- Host events. Signals only set a flag; the run loops notice it
+ * between blocks (JIT) or instructions (interp) and call
+ * host_event_dispatch from ordinary C context. ---- */
+static z80_cpu_t *g_cpu = NULL;
+static volatile sig_atomic_t g_pending_signals = 0;
+
+static void on_signal(int sig) {
+    g_pending_signals |= (sig_atomic_t)(1u << sig);
+    if (g_cpu) g_cpu->host_event = 1;
+}
+
+static void host_event_dispatch(z80_cpu_t *cpu) {
+    (void)cpu;
+    sig_atomic_t pending = g_pending_signals;
+    g_pending_signals = 0;
+    if (pending & (1u << SIGINT)) {
+        /* Clean exit path: atexit restores the terminal. */
+        fprintf(stderr, "\n[exit] interrupted after %llu insns\n",
+                (unsigned long long)cpu->insn_count);
+        exit(130);
+    }
+    /* SIGWINCH / SIGALRM: nothing to repaint until the Kaypro terminal
+     * lands (Phase 1). The plumbing is what matters here. */
+}
+
+static void install_signal_handlers(z80_cpu_t *cpu) {
+    g_cpu = cpu;
+    cpu->on_host_event = host_event_dispatch;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_signal;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT,   &sa, NULL);
+    sigaction(SIGWINCH, &sa, NULL);
+    sigaction(SIGALRM,  &sa, NULL);
+}
 
 static void print_banner(void) {
     printf("z80-monster — 10 BIPS CP/M Monster\n");
@@ -185,6 +224,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    cpm_install_ports(&cpu);
+    install_signal_handlers(&cpu);
+
     enter_raw_mode();
     atexit(leave_raw_mode);
 
@@ -226,6 +268,11 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "[exit] PC=0000 after %llu insns (RET/JP 0 warmboot)\n",
                         (unsigned long long)cpu.insn_count);
                 break;
+            }
+
+            if (cpu.host_event) {
+                cpu.host_event = 0;
+                if (cpu.on_host_event) cpu.on_host_event(&cpu);
             }
 
             int rc = z80_step(&cpu);
