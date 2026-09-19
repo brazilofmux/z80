@@ -59,7 +59,14 @@ int cpm_traps_enabled = 1;
 
 /* ---- images ---------------------------------------------------------- */
 
+static void cpm_host_flush(void) {
+    for (int i = 0; i < HOST_DRIVES; i++)
+        if (drives[i].fp) fflush(drives[i].fp);
+}
+
 int cpm_host_mount(int drive, const char *path) {
+    static int registered;
+    if (!registered) { atexit(cpm_host_flush); registered = 1; }
     if (drive < 0 || drive >= HOST_DRIVES) return -1;
     struct stat st;
     if (stat(path, &st) != 0) { perror(path); return -1; }
@@ -119,7 +126,9 @@ static int disk_io(z80_cpu_t *cpu, int write) {
     if (write) {
         memcpy(buf, &cpu->mem[cur_dma], 128);
         if (fwrite(buf, 1, 128, d->fp) != 128) return 1;
-        fflush(d->fp);
+        /* No flush per record: a sort writing 55K records four times
+         * over was spending most of its wall clock in write(2). The
+         * images are flushed at exit (cpm_host_flush) and by the OS. */
     } else {
         size_t n = fread(buf, 1, 128, d->fp);
         if (n < 128) memset(buf + n, 0xE5, 128 - n);   /* past EOF of a sparse image: blank */
