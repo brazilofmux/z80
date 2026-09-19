@@ -222,7 +222,10 @@ static void extract(img_t *im, const uint8_t *want, const char *outdir) {
         uint8_t *d = entry_ptr(im, e);
         if (d[0] != 0) continue;
         unsigned ext = (d[12] & 0x1F) | (d[14] << 5);
-        if (ext & im->f->exm) continue;          /* not the first entry */
+        /* The first entry of a file has logical extent 0 or, when it is
+         * full, EXM (its LAST extent is recorded); anything beyond the
+         * EXM bits belongs to a later entry. */
+        if (ext & ~im->f->exm) continue;         /* not the first entry */
         /* first entry of some file: is it wanted? */
         uint8_t name[11]; memcpy(name, d + 1, 11);
         for (int i = 0; i < 11; i++) name[i] &= 0x7F;

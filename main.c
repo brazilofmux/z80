@@ -121,6 +121,11 @@ static void enter_raw_mode(void) {
     tcgetattr(STDIN_FILENO, &orig_termios);
     struct termios raw = orig_termios;
     raw.c_lflag &= ~(ICANON | ECHO);
+    /* No signal keys either: ^C is the CCP's abort / WordStar's page
+     * down, ^Z scrolls, ^S/^Q are keystrokes. All of them go to the
+     * guest; ^] (kaypro_kbd.c) is the way out of a session. SIGINT is
+     * still handled for the non-terminal case (kill -INT). */
+    raw.c_lflag &= ~ISIG;
     /* Pass keystrokes through verbatim: don't let the tty driver translate
      * CR <-> NL. CP/M uses 0x0D as line terminator, and with ICRNL on,
      * the ENTER key (which sends 0x0D) was being delivered to the guest
@@ -465,7 +470,9 @@ int main(int argc, char **argv) {
                         (unsigned long long)cpu.insn_count, cpu.pc, cpu.sp,
                         cpu.hl, cpu.de, cpu.bc, cpu.af, cpu.ix, cpu.iy);
             }
-            if (cpu.insn_count > 50000000000ULL) {
+            if (cpm_traps_enabled && cpu.insn_count > 50000000000ULL) {
+                /* A lone .COM that runs this long is looping; a native
+                 * CP/M session runs as long as the user likes. */
                 exit_note("Safety limit (50B insns) reached — bug or wait?\n");
                 break;
             }

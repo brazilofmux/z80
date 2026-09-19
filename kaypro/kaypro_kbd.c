@@ -218,13 +218,6 @@ static int host_fetch(int block) {
         fprintf(stderr, "\n[exit] ^] pressed\n");
         exit(0);
     }
-    if (seq[0] == 0x1D) {
-        /* ^] leaves the emulator, the way it leaves telnet: a native CP/M
-         * session has no other way out (the CCP never exits), and the
-         * atexit chain restores the terminal. */
-        fprintf(stderr, "\n[exit] ^] pressed\n");
-        exit(0);
-    }
     size_t len = 1;
     if (seq[0] == 0x1B) {
         /* Terminals deliver a sequence in one burst; 20 ms is generous. */

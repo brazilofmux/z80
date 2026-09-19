@@ -208,7 +208,8 @@ int dbt_run(z80_dbt_t *dbt) {
         if (cpm_traps_enabled && cpu->pc == 0 && cpu->insn_count > 4) {
             return 0;
         }
-        if (cpu->insn_count > 50000000000ULL) {
+        if (cpm_traps_enabled && cpu->insn_count > 50000000000ULL) {
+            /* Shim mode only: a native CP/M session has no natural end. */
             fprintf(stderr, "dbt_run: 50B insn safety limit reached\n");
             return -1;
         }
