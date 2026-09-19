@@ -92,7 +92,7 @@ For a sense of what a whole computer costs: the same authors' fork of VCC (a CoC
 
 If you want an actual green prompt at silly speed on FreeBSD *today*, that's RunCPM or z80pack on a fast x86 — tens of MIPS, a hundred times faster than the real thing, and it comes with a CCP.
 
-See [CLAUDE.md](CLAUDE.md) for the full architecture notes and development history.
+See [CLAUDE.md](CLAUDE.md) for the full architecture notes and development history, and [docs/machine-plan.md](docs/machine-plan.md) for the plan to wrap the engine in a computer: Kaypro terminal, real CP/M 2.2 on our BIOS, disk images, then WordStar and dBASE.
 
 ## Lineage
 
