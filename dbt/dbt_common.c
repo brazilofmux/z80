@@ -24,6 +24,7 @@
 #include "dbt_flags.h"
 #include "../core/z80.h"
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -324,9 +325,20 @@ int dbt_run(z80_dbt_t *dbt) {
             continue;
         }
 
-        /* Backend gave up on the first insn — step the interpreter once. */
+        /* Backend gave up on the first insn — step the interpreter once.
+         * Timed: on a native CP/M system these are the port traps, and
+         * their share of the wall clock is the number to watch. */
         dbt->interp_fallback_insns++;
+        /* Sampled 1 in 16: two clock reads per step would cost more than
+         * the step. The total is scaled back up in dbt_print_stats. */
+        int timed = (dbt->interp_fallback_insns & 15) == 0;
+        struct timespec fb0, fb1;
+        if (timed) clock_gettime(CLOCK_MONOTONIC, &fb0);
         int rc = z80_step(cpu);
+        if (timed) {
+            clock_gettime(CLOCK_MONOTONIC, &fb1);
+            dbt->interp_fallback_ns += (uint64_t)(fb1.tv_sec - fb0.tv_sec) * 1000000000ull + (uint64_t)(fb1.tv_nsec - fb0.tv_nsec);
+        }
         if (rc < 0) {
             fprintf(stderr, "dbt_run: interpreter stopped at PC=%04X\n", cpu->pc);
             return -1;
@@ -359,8 +371,10 @@ void dbt_print_stats(z80_dbt_t *dbt, FILE *out) {
             (unsigned long long)dbt->cache_misses);
     fprintf(out, "  JIT block entries:      %llu\n",
             (unsigned long long)dbt->jit_block_entries);
-    fprintf(out, "  interp fallback insns:  %llu\n",
-            (unsigned long long)dbt->interp_fallback_insns);
+    fprintf(out, "  interp fallback insns:  %llu  (~%.1f ms of host time, ~%.0f ns each; sampled)\n",
+            (unsigned long long)dbt->interp_fallback_insns,
+            (double)dbt->interp_fallback_ns * 16.0 / 1e6,
+            dbt->interp_fallback_insns ? (double)dbt->interp_fallback_ns * 16.0 / (double)dbt->interp_fallback_insns : 0.0);
     fprintf(out, "  SMC invalidations:      %llu\n",
             (unsigned long long)dbt->smc_invalidations);
     fprintf(out, "  links created/patched/unpatched: %llu / %llu / %llu\n",

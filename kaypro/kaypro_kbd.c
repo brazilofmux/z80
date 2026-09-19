@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -466,7 +467,18 @@ int kaypro_kbd_poll(void) {
          * would take minutes. */
         return 0;
     }
-    if (host_fetch(0) == 1) { empty_polls = 0; return 1; }
+    /* A poll is a BDOS/BIOS trap; WordStar makes hundreds of thousands
+     * per second. Asking the kernel each time would make select() the
+     * program. Look at most once a millisecond — a keystroke waits at
+     * most that long, and nobody can tell. */
+    static struct timespec last_look;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long since_ns = (now.tv_sec - last_look.tv_sec) * 1000000000L + (now.tv_nsec - last_look.tv_nsec);
+    if (since_ns >= 1000000L || since_ns < 0) {
+        last_look = now;
+        if (host_fetch(0) == 1) { empty_polls = 0; return 1; }
+    }
     if (++empty_polls >= KBD_IDLE_POLLS) usleep(1000);
     if (empty_polls > max_quiet_streak) max_quiet_streak = empty_polls;
     return 0;

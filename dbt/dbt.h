@@ -160,6 +160,7 @@ typedef struct {
     uint64_t cache_hits;
     uint64_t cache_misses;
     uint64_t interp_fallback_insns;
+    uint64_t interp_fallback_ns;     /* host time inside those steps (port traps, BDOS...) */
     uint64_t jit_block_entries;
     uint64_t smc_invalidations;
     uint64_t verify_blocks_checked;
