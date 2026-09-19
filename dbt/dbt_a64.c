@@ -791,7 +791,7 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
 
     case Z80_OP_LD_RR_NN:
         /* DD/FD LD HL,nn is really LD IX,nn / LD IY,nn — accept it. */
-        return dec->reg1 >= 0 && dec->reg1 <= 3;
+        return dec->reg1 <= 3;
 
     case Z80_OP_LD_HL_N:
     case Z80_OP_LD_A_BC:
@@ -810,12 +810,12 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
 
     case Z80_OP_INC_RR:
     case Z80_OP_DEC_RR:
-        return dec->reg1 >= 0 && dec->reg1 <= 3;
+        return dec->reg1 <= 3;
 
     /* ADD HL,rr — and under DD/FD, ADD IX,rr / ADD IY,rr. reg1==2 names
      * the destination register itself (ADD HL,HL / ADD IX,IX). */
     case Z80_OP_ADD_HL_RR:
-        return dec->reg1 >= 0 && dec->reg1 <= 3;
+        return dec->reg1 <= 3;
 
     /* Accumulator rotates + DAA. DD/FD-prefixed forms are decode quirks;
      * leave those to the interp. */

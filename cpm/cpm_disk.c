@@ -669,7 +669,9 @@ void cpm_set_a_root(const char *path)
 static void make_host_path(const char *name, char *out, size_t outlen)
 {
     if (a_root[0]) {
-        snprintf(out, outlen, "%s/%s", a_root, name);
+        int n = snprintf(out, outlen, "%s/%s", a_root, name);
+        if (n < 0 || (size_t)n >= outlen)
+            out[0] = 0;     /* truncated path: fail the open, don't guess */
     } else {
         strncpy(out, name, outlen);
         out[outlen - 1] = 0;
