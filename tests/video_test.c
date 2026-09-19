@@ -170,6 +170,21 @@ int main(void) {
     expect_row("status off LF", 23, "S25");
     expect_row("status off LF", 24, "");
 
+    /* Bit-7 bytes: highlighted text with video mode off (Turbo Pascal's
+     * "Kaypro with hilite" sends 'L'|0x80), two-byte graphics blocks
+     * with it on. */
+    kaypro_video_init(KAYPRO_MODEL_84);
+    kaypro_video_putc(0xCC); FEED("ogged");
+    expect_row("hibit text", 0, "Logged");
+    expect_attr("hibit text", 0, 0, KV_ATTR_REVERSE);
+    expect_attr("hibit text", 0, 1, 0);
+    FEED("\x1b" "B5"); kaypro_video_putc(0x81); kaypro_video_putc(0xC3); FEED("\x1b" "C5" "x");
+    if (kaypro_video.cells[0][6].ch != 0xC3 || !(kaypro_video.cells[0][6].attr & KV_ATTR_PIXEL7)) {
+        failures++; fprintf(stderr, "FAIL video-mode graphics: ch=%02X attr=%02X\n",
+                            kaypro_video.cells[0][6].ch, kaypro_video.cells[0][6].attr);
+    }
+    expect_row("video mode", 0, "Logged\xC3x");
+
     /* NUL displays as an accent grave (guide p. 87); ESC A is a no-op. */
     kaypro_video_init(KAYPRO_MODEL_84);
     FEED("a\x00" "b" "\x1b" "Ac");

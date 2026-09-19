@@ -169,7 +169,7 @@ static void e_cursor(const uint8_t *a) { set_cursor(a[0] - 0x20, a[1] - 0x20); }
 
 /* ESC B n / ESC C n : '84 attribute n on / off (guide pp. 68, 77-78):
  *   0 inverse video, 1 reduced intensity, 2 blinking, 3 underline,
- *   4 cursor on/off, 5 "video mode" on/off (accepted, no effect here),
+ *   4 cursor on/off, 5 video mode on/off (see kaypro_video_t.video_mode),
  *   6 B = remember cursor position, C = return to it,
  *   7 status-line preservation on/off. */
 static void attr_set(uint8_t n, int on) {
@@ -180,7 +180,7 @@ static void attr_set(uint8_t n, int on) {
     case '2': bit = KV_ATTR_BLINK;     break;
     case '3': bit = KV_ATTR_UNDERLINE; break;
     case '4': KV->cursor_visible = on; KV->cursor_moved = 1; return;
-    case '5': return;
+    case '5': KV->video_mode = on; KV->gfx_pending = 0; return;
     case '6':
         if (on) { KV->saved_row = KV->cur_row; KV->saved_col = KV->cur_col; }
         else    set_cursor(KV->saved_row, KV->saved_col);
@@ -275,6 +275,31 @@ void kaypro_video_putc(uint8_t ch) {
         break;
     }
 
+    if (ch & 0x80) {
+        if (!KV->video_mode) {
+            /* Highlighted text: the low seven bits, shown inverse. A
+             * control code under the high bit has no defined look; show
+             * it as a block so it isn't silently lost. */
+            uint8_t low = ch & 0x7F;
+            if (low >= 0x20 && low != 0x7F) {
+                uint8_t saved = KV->attr;
+                KV->attr |= KV_ATTR_REVERSE;
+                put_char(low);
+                KV->attr = saved;
+            } else {
+                put_char(ch);
+            }
+            return;
+        }
+        /* Video mode: two bytes per graphics block. */
+        if (!KV->gfx_pending) { KV->gfx_pending = 1; KV->gfx_first = ch; return; }
+        KV->gfx_pending = 0;
+        uint8_t saved = KV->attr;
+        KV->attr = (uint8_t)((saved & ~KV_ATTR_PIXEL7) | ((KV->gfx_first & 1) ? KV_ATTR_PIXEL7 : 0));
+        put_char((uint8_t)(0x80 | (ch & 0x7F)));
+        KV->attr = saved;
+        return;
+    }
     if (ch < 0x20) {
         ctrl_fn f = ctrl_handlers[ch];
         if (f) f(); else KV->unknown_ctrl++;

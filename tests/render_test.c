@@ -97,13 +97,20 @@ int main(void) {
     expect_contains("scroll", o, "\033[24;1Hlast");
     free(o);
 
-    /* Graphics character 0x81 (pixel #0 only: right column, top row)
-     * -> braille dot 4 = U+2808 = E2 A0 88. */
+    /* Video-mode graphics block: first byte LSB=1 (pixel #7 -> dot 7),
+     * second byte 0x81 (pixel #0 -> dot 4): dots 4+7 = U+2848 = E2 A1 88. */
     kaypro_video_init(KAYPRO_MODEL_84);
     kaypro_render_tty_invalidate();
-    kaypro_video_putc(0x81);
+    feed("\033" "B5"); kaypro_video_putc(0x81); kaypro_video_putc(0x81); feed("\033" "C5");
     o = capture(0, &n);
-    expect_contains("braille", o, "\xE2\xA0\x88");
+    expect_contains("braille", o, "\xE2\xA1\x88");
+    expect_absent("braille no sgr for pixel7", o, "\033[0;");
+    free(o);
+
+    /* High-bit text outside video mode is inverse. */
+    kaypro_video_putc(0xC1);   /* 'A' | 0x80 */
+    o = capture(0, &n);
+    expect_contains("hibit inverse", o, "\033[0;7mA");
     free(o);
 
     /* Cursor hidden by ESC C 4: no show sequence, hide is present. */

@@ -41,6 +41,7 @@
 #define KV_ATTR_DIM       0x02
 #define KV_ATTR_BLINK     0x04
 #define KV_ATTR_UNDERLINE 0x08
+#define KV_ATTR_PIXEL7    0x10   /* graphics cell only: the 8th pixel (video-mode 2-byte form) */
 
 typedef struct {
     uint8_t ch;      /* the byte the guest wrote; 0x20 for erased cells */
@@ -57,6 +58,15 @@ typedef struct {
     int      model;               /* KAYPRO_MODEL_* */
     int      status_preserve;     /* '84: row 24 excluded from scroll/clear (ESC B/C 7) */
     int      saved_row, saved_col;/* '84: ESC B 6 / ESC C 6 */
+    /* '84 "video mode" (ESC B 5 / ESC C 5, Addendum p. 18). Off (the
+     * default): a byte with bit 7 set is the character in its low seven
+     * bits shown highlighted (inverse) — what Turbo Pascal's "Kaypro
+     * with hilite" definition relies on. On: bit-7 bytes are 2x4 pixel
+     * graphics blocks, two bytes each — the first byte's LSB is pixel #7,
+     * the second byte's low seven bits are pixels #0-#6. */
+    int      video_mode;
+    int      gfx_pending;         /* video mode: first byte of a pair seen */
+    uint8_t  gfx_first;
 
     /* Escape-sequence state machine. */
     int      esc_state;           /* 0 = none, 1 = got ESC, 2 = collecting args */

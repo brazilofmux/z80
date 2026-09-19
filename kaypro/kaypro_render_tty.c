@@ -49,10 +49,10 @@ void kaypro_render_tty_shutdown(void) {
  * dots have the same 2x4 shape. Kaypro pixel layout (left, right per
  * row): (#1,#0) (#3,#2) (#5,#4) (#7,#6); braille dots 1-3 run down the
  * left column, 4-6 down the right, 7 and 8 are the bottom row. Pixel #7
- * is only reachable through "video mode" (Addendum p. 18), which the
- * model does not track yet, so it stays off. */
-static void put_graphic(FILE *f, uint8_t g) {
-    unsigned dots = 0;
+ * comes from the video-mode two-byte form (Addendum p. 18) and rides in
+ * the cell's KV_ATTR_PIXEL7 bit. */
+static void put_graphic(FILE *f, uint8_t g, int pixel7) {
+    unsigned dots = pixel7 ? 0x40 : 0;   /* #7 -> dot 7 (left, row 4) */
     if (g & 0x02) dots |= 0x01;   /* #1 -> dot 1 (left, row 1) */
     if (g & 0x08) dots |= 0x02;   /* #3 -> dot 2 (left, row 2) */
     if (g & 0x20) dots |= 0x04;   /* #5 -> dot 3 (left, row 3) */
@@ -66,8 +66,8 @@ static void put_graphic(FILE *f, uint8_t g) {
     fputc((int)(0x80 | (cp & 0x3F)), f);
 }
 
-static void put_cell_char(FILE *f, uint8_t ch) {
-    if (ch & 0x80)                    put_graphic(f, ch);
+static void put_cell_char(FILE *f, uint8_t ch, uint8_t attr) {
+    if (ch & 0x80)                    put_graphic(f, ch, attr & KV_ATTR_PIXEL7);
     else if (ch >= 0x20 && ch < 0x7F) fputc(ch, f);
     else                              fputc('?', f);   /* model never stores these */
 }
@@ -132,8 +132,9 @@ void kaypro_render_tty_flush(int force) {
                     if (k > GAP_MAX) break;   /* skip it with a goto */
                 }
                 const kaypro_cell_t *cell = &v->cells[r][c];
-                if (cell->attr != cur_attr) { emit_attr(f, cell->attr); cur_attr = cell->attr; }
-                put_cell_char(f, cell->ch);
+                int sgr = cell->attr & ~KV_ATTR_PIXEL7;   /* PIXEL7 is not a style */
+                if (sgr != cur_attr) { emit_attr(f, (uint8_t)sgr); cur_attr = sgr; }
+                put_cell_char(f, cell->ch, cell->attr);
                 c++;
             }
         }
