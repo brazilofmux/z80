@@ -33,16 +33,16 @@ Single core, JIT unless noted:
 
 | Workload | M5 Max MacBook | M5 Max, x86-64 build under Rosetta 2 | Xeon 8259CL VM (x86-64) | Raspberry Pi 4 |
 |----------|----------------|--------------------------------------|-------------------------|----------------|
-| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** | **3.15 BIPS** | **1.82 BIPS** | **532 MIPS** |
-| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** | **0.17 BIPS** | **1.3 BIPS** | **0.47 BIPS** |
-| Same workloads, reference interpreter | ~230 MIPS | — | ~70 MIPS | ~24 MIPS |
-| WordStar 3.00 global search-and-replace over a 50-page document, native CP/M 2.2 (`bench/wsreplace.sh`, 293M insns) | **4.8 BIPS** | | **1.62 BIPS** | |
+| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** | **3.15 BIPS** | **1.74 BIPS** | **532 MIPS** |
+| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** | **0.17 BIPS** | **1.28 BIPS** | **0.47 BIPS** |
+| Same workloads, reference interpreter | ~230 MIPS | — | ~60 MIPS | ~24 MIPS |
+| WordStar 3.00 global search-and-replace over a 50-page document, native CP/M 2.2 (`bench/wsreplace.sh`, 293M insns) | **4.8 BIPS** | | **1.63 BIPS** | |
 
 The Pi 4 (Cortex-A72 @ 1.5 GHz, Debian 11, GCC 10, Linux/aarch64) built from a clean clone with no source changes; zexdoc and zexall pass 67/67 under the JIT, and the full zexdoc run passes under `-V` lockstep verification in six minutes. No Mac required.
 
 The Rosetta column is the same M5 Max running the x86-64 *build* — the JIT emits x86-64, and Apple's Rosetta 2 translates that to arm64 underneath it — built with `arch -x86_64 make CC='clang -arch x86_64'`. It passes zexdoc and zexall 67/67 and the full zexdoc `-V` lockstep run (5.76B instructions, 115 s). SQUARO translates its 383 blocks once and then runs them, so Rosetta's own translation cost is paid once and it out-runs the Xeon VM (which says more about the VM's core than about Rosetta). zexdoc is the opposite case: it patches its test instruction 7.4 million times, every patch retranslates a Z80 block, and every retranslation rewrites a page of x86-64 that Rosetta then has to translate again — two JITs invalidating each other, 20× slower than native. A neat measurement of what self-modifying code costs a binary translator, taken with a second binary translator.
 
-The x86-64 column is a 4-vCPU cloud VM (Xeon Platinum 8259CL, 2.5 GHz base, Ubuntu 24.04, GCC 13) — a much slower core than the M5, and a hypervisor with no performance counters. Same clean tree, same 67/67 on zexdoc and zexall, and both full exercisers pass under `-V` lockstep in about two minutes each.
+The x86-64 column is a 4-vCPU cloud VM (Xeon Platinum 8259CL, 2.5 GHz base, Ubuntu 24.04, GCC 13) — a much slower core than the M5, and a hypervisor with no performance counters; its numbers drift a few percent day to day with the neighbours, and the column is refreshed together as one session's measurements. Same clean tree, same 67/67 on zexdoc and zexall, and both full exercisers pass under `-V` lockstep in about two minutes each.
 
 The JIT's interpreter-fallback rate on real workloads is ~0.02% — essentially everything runs as translated native code. Real software runs today: Zork 1, MS COBOL (the compiler *and* its output), and the zexdoc/zexall instruction exercisers pass 67/67 with correct CRCs.
 
