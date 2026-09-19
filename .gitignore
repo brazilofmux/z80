@@ -56,3 +56,5 @@ cpm/cpm22/bios.bin
 tests/scripts/*.dsk
 tools/mkdsk
 disks/work.dsk
+disks/a.dsk
+disks/b.dsk

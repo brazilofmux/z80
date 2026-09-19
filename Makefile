@@ -128,6 +128,25 @@ workdisk: tools/mkdsk
 	  n=0; for f in $$files; do ./tools/mkdsk disks/work.dsk "$$f" > /dev/null; n=$$((n+1)); done; \
 	  echo "disks/work.dsk: $$n files"; ./tools/mkdsk -l disks/work.dsk | tail -1
 
+# Two floppies, the way a Kaypro shipped them: A: the working disk (BASIC,
+# M80/L80, a README and a letter to edit), B: WordStar 3.0 with its
+# overlays, MailMerge and INSTALL. Needs disks/wordstar/ (and whatever
+# else is present; missing pieces are left out). Then:
+#   ./z80-monster -j -K -A disks/a.dsk -B disks/b.dsk     B: then WS
+.PHONY: floppies
+floppies: tools/mkdsk
+	@rm -f disks/a.dsk disks/b.dsk
+	@printf 'z80-monster working disk (A:)\r\n\r\n  B: then WS  WordStar 3.0 (overlays on B:)\r\n  MBASIC      Microsoft BASIC-80\r\n  M80 / L80   Microsoft macro assembler and linker\r\n  LETTER.TXT  a document to open in WordStar\r\n\r\n^] leaves the emulator.\r\n\032' > disks/README.TXT
+	@printf 'Dear Kaypro,\r\n\r\nThis letter was written in WordStar 3.0 on a Z80 running at\r\nfour billion instructions per second, which is about eight\r\nthousand times faster than you ever ran. Sorry.\r\n\r\nYours,\r\nThe monster\r\n\032' > disks/LETTER.TXT
+	@a="disks/README.TXT disks/LETTER.TXT"; \
+	 for f in disks/mbasic/BASIC522.COM,280 disks/m80/m80.com disks/m80/l80.com disks/bbcbasic/BBCBASIC.COM; do [ -f "$$f" ] && a="$$a $$f"; done; \
+	 ./tools/mkdsk -f fd disks/a.dsk $$a | sed 's/^/  A: /'
+	@if [ -f disks/wordstar/WS.COM ]; then \
+	   b=""; for f in WS.COM WSMSGS.OVR WSOVLY1.OVR MAILMRGE.OVR MERGPRIN.OVR WIMSGS.OVR INSTALL.COM WSU.COM; do [ -f disks/wordstar/$$f ] && b="$$b disks/wordstar/$$f"; done; \
+	   ./tools/mkdsk -f fd disks/b.dsk $$b disks/LETTER.TXT | sed 's/^/  B: /'; \
+	 else echo "  B: skipped — no disks/wordstar/WS.COM"; fi
+	@rm -f disks/README.TXT disks/LETTER.TXT
+
 # Disk image tool (tools/mkdsk.c): make, fill, list, extract z80m images.
 tools/mkdsk: tools/mkdsk.c
 	$(CC) $(CFLAGS) -o $@ tools/mkdsk.c
