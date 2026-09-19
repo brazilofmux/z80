@@ -36,31 +36,196 @@ unsigned kaypro_kbd_max_quiet_streak(void) { return max_quiet_streak; }
 uint64_t kaypro_kbd_reads(void) { return n_reads; }
 int      kaypro_kbd_scripted(void) { return scripted; }
 
+static int hexval(int c);
+static void keymap_defaults(void);
+
 void kaypro_kbd_init(void) {
     q_head = q_tail = 0;
     n_polls = n_reads = 0;
     empty_polls = 0;
     scripted = 0;
+    keymap_defaults();
+    if (kaypro_kbd_keys_configure(getenv("Z80_KEYS")) != 0)
+        fprintf(stderr, "Z80_KEYS: bad key spec ignored\n");
+}
+
+/* ---- key mapping ------------------------------------------------------ */
+
+typedef struct { uint8_t bytes[8]; uint8_t n; } keydef_t;
+static keydef_t keymap[KEY_COUNT];
+static int keymap_ready;
+
+static void key_set1(int key, uint8_t b) { keymap[key].bytes[0] = b; keymap[key].n = 1; }
+void kaypro_kbd_key_set(int key, const uint8_t *bytes, size_t n) {
+    if (key < 0 || key >= KEY_COUNT) return;
+    if (n > sizeof keymap[key].bytes) n = sizeof keymap[key].bytes;
+    memcpy(keymap[key].bytes, bytes, n);
+    keymap[key].n = (uint8_t)n;
+}
+
+static void keymap_defaults(void) {
+    memset(keymap, 0, sizeof keymap);
+    key_set1(KEY_UP, 0x0B); key_set1(KEY_DOWN, 0x0A);
+    key_set1(KEY_LEFT, 0x08); key_set1(KEY_RIGHT, 0x0C);
+    key_set1(KEY_DEL, 0x7F); key_set1(KEY_BS, 0x08);
+    keymap_ready = 1;
+}
+
+static const char *key_names[KEY_COUNT] = {
+    "up", "down", "left", "right", "home", "end", "ins", "del", "pgup", "pgdn",
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "bs"
+};
+
+/* Decode script-style escapes (\r \n \e \^X \xHH \\) into bytes. */
+static size_t unescape(const char *src, size_t len, uint8_t *out, size_t cap) {
+    size_t n = 0;
+    for (size_t i = 0; i < len && n < cap; i++) {
+        char c = src[i];
+        if (c != '\\') { out[n++] = (uint8_t)c; continue; }
+        if (++i >= len) break;
+        switch (src[i]) {
+        case 'r': out[n++] = '\r'; break;
+        case 'n': out[n++] = '\n'; break;
+        case 't': out[n++] = '\t'; break;
+        case 'e': out[n++] = 0x1B; break;
+        case '^': if (++i < len) out[n++] = (uint8_t)(src[i] & 0x1F); break;
+        case 'x': {
+            int h = i + 1 < len ? hexval(src[i + 1]) : -1, l = i + 2 < len ? hexval(src[i + 2]) : -1;
+            if (h >= 0 && l >= 0) { out[n++] = (uint8_t)(h * 16 + l); i += 2; }
+            break;
+        }
+        default: out[n++] = (uint8_t)src[i]; break;
+        }
+    }
+    return n;
+}
+
+int kaypro_kbd_keys_configure(const char *spec) {
+    if (!keymap_ready) keymap_defaults();
+    if (!spec || !*spec) return 0;
+    if (!strcmp(spec, "wordstar")) {
+        key_set1(KEY_UP, 0x05); key_set1(KEY_DOWN, 0x18);
+        key_set1(KEY_LEFT, 0x13); key_set1(KEY_RIGHT, 0x04);
+        key_set1(KEY_PGUP, 0x12); key_set1(KEY_PGDN, 0x03);
+        key_set1(KEY_DEL, 0x07);                       /* ^G delete char right */
+        key_set1(KEY_BS, 0x7F);                        /* DEL: delete char left */
+        kaypro_kbd_key_set(KEY_HOME, (const uint8_t *)"\x11\x13", 2);  /* ^Q^S */
+        kaypro_kbd_key_set(KEY_END,  (const uint8_t *)"\x11\x04", 2);  /* ^Q^D */
+        return 0;
+    }
+    /* name=value,name=value,... */
+    const char *p = spec;
+    while (*p) {
+        const char *eq = strchr(p, '=');
+        if (!eq) return -1;
+        const char *end = strchr(eq, ',');
+        size_t vlen = end ? (size_t)(end - eq - 1) : strlen(eq + 1);
+        int key = -1;
+        for (int k = 0; k < KEY_COUNT; k++)
+            if (strlen(key_names[k]) == (size_t)(eq - p) && !strncmp(p, key_names[k], (size_t)(eq - p))) key = k;
+        if (key < 0) return -1;
+        uint8_t bytes[8];
+        size_t n = unescape(eq + 1, vlen, bytes, sizeof bytes);
+        kaypro_kbd_key_set(key, bytes, n);
+        if (!end) break;
+        p = end + 1;
+    }
+    return 0;
+}
+
+/* Which key does a host escape sequence name? -1 for none. Covers the
+ * xterm/VT100 forms every modern terminal sends: CSI A-D / H / F, SS3
+ * A-D / H / F / P-S, CSI n ~ (1-8, 11-24), and modified arrows
+ * CSI 1 ; m X as the plain key. */
+static int key_for_sequence(const uint8_t *seq, size_t n) {
+    if (n < 3 || seq[0] != 0x1B) return -1;
+    uint8_t kind = seq[1];                 /* '[' CSI or 'O' SS3 */
+    if (kind != '[' && kind != 'O') return -1;
+    uint8_t last = seq[n - 1];
+    if (n == 3 || (kind == '[' && n >= 6 && seq[2] == '1' && seq[3] == ';')) {
+        switch (last) {
+        case 'A': return KEY_UP;   case 'B': return KEY_DOWN;
+        case 'C': return KEY_RIGHT; case 'D': return KEY_LEFT;
+        case 'H': return KEY_HOME; case 'F': return KEY_END;
+        case 'P': return n == 3 ? KEY_F1 : -1;   case 'Q': return n == 3 ? KEY_F2 : -1;
+        case 'R': return n == 3 ? KEY_F3 : -1;   case 'S': return n == 3 ? KEY_F4 : -1;
+        default:  return -1;
+        }
+    }
+    if (kind == '[' && last == '~') {
+        int num = 0;
+        for (size_t i = 2; i + 1 < n && seq[i] >= '0' && seq[i] <= '9'; i++) num = num * 10 + (seq[i] - '0');
+        switch (num) {
+        case 1: case 7: return KEY_HOME;  case 4: case 8: return KEY_END;
+        case 2: return KEY_INS;  case 3: return KEY_DEL;
+        case 5: return KEY_PGUP; case 6: return KEY_PGDN;
+        case 11: return KEY_F1;  case 12: return KEY_F2;  case 13: return KEY_F3;  case 14: return KEY_F4;
+        case 15: return KEY_F5;  case 17: return KEY_F6;  case 18: return KEY_F7;  case 19: return KEY_F8;
+        case 20: return KEY_F9;  case 21: return KEY_F10; case 23: return KEY_F11; case 24: return KEY_F12;
+        default: return -1;
+        }
+    }
+    return -1;
+}
+
+size_t kaypro_kbd_translate(const uint8_t *seq, size_t n, uint8_t *out, size_t outcap) {
+    if (!keymap_ready) keymap_defaults();
+    if (n == 0 || outcap == 0) return 0;
+    int key;
+    if (n == 1) {
+        /* Both bytes a host Backspace key can send are the Kaypro's
+         * BACKSPACE key; the Delete key (CSI 3 ~) is KEY_DEL. */
+        if (seq[0] == 0x7F || seq[0] == 0x08) key = KEY_BS;
+        else { out[0] = seq[0]; return 1; }
+    } else {
+        key = key_for_sequence(seq, n);
+        if (key < 0) return 0;                      /* unknown sequence: swallowed whole */
+    }
+    size_t k = keymap[key].n;
+    if (k > outcap) k = outcap;
+    memcpy(out, keymap[key].bytes, k);
+    return k;
 }
 
 /* ---- host terminal source -------------------------------------------- */
 
-/* Non-blocking: move one byte from stdin into the queue if there is one. */
-static int host_fetch(int block) {
+static int stdin_readable(long wait_us) {
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(STDIN_FILENO, &rfds);
-    struct timeval tv = {0, 0};
+    struct timeval tv = { wait_us / 1000000, wait_us % 1000000 };
     int ret;
     do {
-        ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, block ? NULL : &tv);
+        ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, wait_us < 0 ? NULL : &tv);
     } while (ret < 0 && errno == EINTR);
-    if (ret <= 0 || !FD_ISSET(STDIN_FILENO, &rfds)) return 0;
-    unsigned char ch;
-    ssize_t n = read(STDIN_FILENO, &ch, 1);
+    return ret > 0 && FD_ISSET(STDIN_FILENO, &rfds);
+}
+
+/* Move one host key into the queue: a byte, or an ESC-led sequence
+ * gathered while more bytes follow within a few milliseconds (a lone
+ * ESC pressed by hand arrives alone). Returns 1 if something was
+ * queued, 0 if nothing was available or the key is unmapped, -1 on
+ * EOF. */
+static int host_fetch(int block) {
+    if (!stdin_readable(block ? -1 : 0)) return 0;
+    uint8_t seq[16];
+    ssize_t n = read(STDIN_FILENO, seq, 1);
     if (n <= 0) return -1;               /* EOF or error */
-    q_push(ch);
-    return 1;
+    size_t len = 1;
+    if (seq[0] == 0x1B) {
+        /* Terminals deliver a sequence in one burst; 20 ms is generous. */
+        while (len < sizeof seq && stdin_readable(len == 1 ? 20000 : 2000)) {
+            if (read(STDIN_FILENO, seq + len, 1) <= 0) break;
+            len++;
+            uint8_t c = seq[len - 1];
+            if (len == 2 && c != '[' && c != 'O') break;            /* ESC x: not a sequence */
+            if (len >= 3 && (seq[1] == 'O' || (c >= 0x40 && c <= 0x7E))) break;   /* final byte */
+        }
+    }
+    uint8_t out[8];
+    size_t k = kaypro_kbd_translate(seq, len, out, sizeof out);
+    for (size_t i = 0; i < k; i++) q_push(out[i]);
+    return k ? 1 : 0;
 }
 
 /* ---- script source ---------------------------------------------------- */
@@ -290,9 +455,12 @@ int kaypro_kbd_read(void) {
         if (r == 1) return q_pop();
         return KBD_END;
     }
-    int r = host_fetch(1);
-    if (r == 1) return q_pop();
-    return 0x1A;                         /* stdin EOF: CP/M's ^Z */
+    for (;;) {
+        int r = host_fetch(1);
+        if (r == 1) return q_pop();
+        if (r < 0) return 0x1A;          /* stdin EOF: CP/M's ^Z */
+        /* r == 0: an unmapped key was swallowed; keep waiting */
+    }
 }
 
 void kaypro_kbd_wait(void) {
@@ -306,5 +474,5 @@ void kaypro_kbd_wait(void) {
         }
         return;
     }
-    host_fetch(1);
+    while (host_fetch(1) == 0) { }       /* swallow unmapped keys until something arrives (or EOF) */
 }

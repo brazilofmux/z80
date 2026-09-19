@@ -40,20 +40,53 @@
  * core at 4 BIPS, so after KBD_IDLE_POLLS consecutive empty polls each
  * further poll sleeps a millisecond. Any console output resets the
  * count, so a program that polls between units of real work is not
- * slowed down.
+ * slowed down, and the threshold sits above programs' own silent
+ * delay loops so those still run at guest speed.
  */
 #ifndef KAYPRO_KBD_H
 #define KAYPRO_KBD_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define KBD_END (-1)
-#define KBD_IDLE_POLLS 64          /* host terminal: sleep after this many quiet polls */
+/* Host terminal: after this many consecutive quiet polls, each poll
+ * sleeps a millisecond. Set above the silent poll loops programs use
+ * for message delays (WordStar: ~16500), which run at full speed and
+ * cost ~20 ms; a program idling at the keyboard spins that long once
+ * and then sleeps. (At 64 the sleep turned WordStar's 1-second
+ * delays into 16-second ones.) */
+#define KBD_IDLE_POLLS 20000
 #define KBD_IDLE_END_POLLS 40000   /* script exhausted: end after this many quiet polls */
 #define KBD_WAIT_IDLE_DEFAULT 20000 /* @wait-idle / ~ with no count */
 
 /* Host-terminal source (the default). */
 void kaypro_kbd_init(void);
+
+/* Host key mapping. The host terminal sends escape sequences for the
+ * arrow, function and editing keys; the Kaypro keyboard sent single
+ * bytes (all of them user-definable with CONFIG — the User's Guide
+ * gives no factory table, so the defaults here are the ADM-3A cursor
+ * controls the terminal itself understands: up ^K, down ^J, left ^H,
+ * right ^L; the Backspace key — whether the host sends 0x7F or 0x08 —
+ * is the Kaypro BACKSPACE key, ^H; the Delete key is DEL, 0x7F; the
+ * rest unmapped).
+ * Z80_KEYS overrides: "wordstar" (arrows ^E ^X ^S ^D, PgUp/PgDn ^R ^C,
+ * Home/End ^Q^S/^Q^D) or a list "up=\^E,f1=\^KD,del=\x7f,..." with the
+ * script escapes; names: up down left right home end ins del pgup pgdn
+ * f1..f12, bs. An empty value unmaps the key. */
+enum {
+    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END, KEY_INS, KEY_DEL,
+    KEY_PGUP, KEY_PGDN, KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
+    KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12, KEY_BS, KEY_COUNT
+};
+int  kaypro_kbd_keys_configure(const char *spec);      /* 0 ok, -1 bad spec */
+void kaypro_kbd_key_set(int key, const uint8_t *bytes, size_t n);
+
+/* Translate one host input token — a plain byte or a whole escape
+ * sequence — into the bytes the Kaypro keyboard would have sent.
+ * Returns the number written to out (0 = swallowed). Pure, for tests. */
+size_t kaypro_kbd_translate(const uint8_t *seq, size_t n, uint8_t *out, size_t outcap);
 
 /* The cpu whose memory @mem dumps (main sets it once). */
 struct z80_cpu;

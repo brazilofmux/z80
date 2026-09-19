@@ -10,6 +10,8 @@
 #include "kaypro_video.h"
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
 
 static FILE *out;                       /* NULL until set; defaults to stdout */
 static int   active;
@@ -17,13 +19,35 @@ static kaypro_cell_t shadow[KV_ROWS][KV_COLS];
 static int   shadow_valid;              /* 0 => next flush paints everything */
 static struct timespec last_paint;
 
+/* HUD state and host terminal size. */
+static char hud_text[KV_COLS + 1];
+static char hud_painted[KV_COLS + 1];
+static int  hud_dirty;
+static int  term_rows = 24, term_cols = 80;
+
+void kaypro_render_tty_set_size(int rows, int cols) { term_rows = rows; term_cols = cols; }
+
+static void query_size(void) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) {
+        term_rows = ws.ws_row; term_cols = ws.ws_col;
+    }
+}
+
+void kaypro_render_tty_set_hud(const char *text) {
+    char next[KV_COLS + 1];
+    if (text && *text) snprintf(next, sizeof next, "%-80.80s", text);
+    else next[0] = 0;
+    if (strcmp(next, hud_text) != 0) { memcpy(hud_text, next, sizeof hud_text); hud_dirty = 1; }
+}
+
 #define FRAME_NS 16000000L              /* ~60 Hz cap on repaints during bursts */
 
 static FILE *stream(void) { return out ? out : stdout; }
 
 void kaypro_render_tty_set_output(FILE *f) { out = f; }
 int  kaypro_render_tty_active(void) { return active; }
-void kaypro_render_tty_invalidate(void) { shadow_valid = 0; }
+void kaypro_render_tty_invalidate(void) { shadow_valid = 0; hud_dirty = 1; if (!out) query_size(); }
 
 void kaypro_render_tty_init(void) {
     FILE *f = stream();
@@ -32,6 +56,8 @@ void kaypro_render_tty_init(void) {
     fputs("\033[?1049h\033[0m\033[2J\033[H\033[?25l", f);
     fflush(f);
     shadow_valid = 0;
+    hud_painted[0] = 0; hud_dirty = 1;
+    if (!out) query_size();
     clock_gettime(CLOCK_MONOTONIC, &last_paint);
     active = 1;
 }
@@ -90,7 +116,7 @@ static void emit_goto(FILE *f, int r, int c) {
 void kaypro_render_tty_flush(int force) {
     if (!active) return;
     kaypro_video_t *v = &kaypro_video;
-    if (!force && shadow_valid && !v->dirty_rows && !v->cursor_moved) return;
+    if (!force && shadow_valid && !v->dirty_rows && !v->cursor_moved && !hud_dirty) return;
 
     FILE *f = stream();
     int full = force || !shadow_valid;
@@ -142,6 +168,18 @@ void kaypro_render_tty_flush(int force) {
     }
     if (cur_attr != 0) fputs("\033[0m", f);
 
+    /* HUD on host line 26, dim, when there is a line 26. */
+    if (hud_dirty || full) {
+        if (term_rows > KV_ROWS) {
+            if (hud_text[0])
+                fprintf(f, "\033[%d;1H\033[0;2m%s\033[0m", KV_ROWS + 1, hud_text);
+            else if (hud_painted[0])
+                fprintf(f, "\033[%d;1H\033[K", KV_ROWS + 1);
+            memcpy(hud_painted, hud_text, sizeof hud_painted);
+        }
+        hud_dirty = 0;      /* a terminal that grows later re-dirties via invalidate */
+    }
+
     /* Park the terminal cursor where the Kaypro's is, and match its
      * visibility. */
     emit_goto(f, v->cur_row, v->cur_col);
@@ -156,7 +194,7 @@ void kaypro_render_tty_flush(int force) {
 void kaypro_render_tty_flush_if_due(void) {
     if (!active) return;
     kaypro_video_t *v = &kaypro_video;
-    if (shadow_valid && !v->dirty_rows && !v->cursor_moved) return;
+    if (shadow_valid && !v->dirty_rows && !v->cursor_moved && !hud_dirty) return;
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     long ns = (now.tv_sec - last_paint.tv_sec) * 1000000000L + (now.tv_nsec - last_paint.tv_nsec);

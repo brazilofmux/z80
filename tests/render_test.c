@@ -120,6 +120,26 @@ int main(void) {
     expect_absent("cursor hide", o, "\033[?25h");
     free(o);
 
+    /* HUD: painted on host line 26 when the terminal has one, dim, and
+     * only when its text changes; a 24-row terminal never sees it. */
+    kaypro_render_tty_set_size(24, 80);
+    kaypro_render_tty_set_hud("4.31 BIPS");
+    o = capture(0, &n);
+    expect_absent("hud on short terminal", o, "\033[26;1H");
+    free(o);
+    kaypro_render_tty_set_size(30, 80);
+    kaypro_render_tty_set_hud("4.32 BIPS");
+    o = capture(0, &n);
+    expect_contains("hud", o, "\033[26;1H\033[0;2m4.32 BIPS");
+    free(o);
+    o = capture(0, &n);
+    if (n != 0) { failures++; fprintf(stderr, "FAIL unchanged hud repainted (%zu bytes)\n", n); }
+    free(o);
+    kaypro_render_tty_set_hud(NULL);
+    o = capture(0, &n);
+    expect_contains("hud cleared", o, "\033[26;1H\033[K");
+    free(o);
+
     /* Shutdown leaves the alternate screen. */
     char *sbuf = NULL; size_t slen = 0;
     FILE *sd = open_memstream(&sbuf, &slen);

@@ -46,3 +46,4 @@ tests/render_test
 tests/*.dSYM/
 tests/scripts/*.dump
 tests/scripts/*.err
+tests/kbd_test

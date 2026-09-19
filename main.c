@@ -10,6 +10,8 @@
 #include <termios.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
+#include <sys/time.h>
 #include <stdarg.h>
 #include <dirent.h>
 #include <limits.h>
@@ -46,6 +48,38 @@ static void on_signal(int sig) {
     if (g_cpu) g_cpu->host_event = 1;
 }
 
+/* ---- HUD: host line 26, refreshed by a 4 Hz SIGALRM. Only programs
+ * that trap into the host (console, disk) reach the dispatcher, so a
+ * pure compute loop shows its last figure until it does — see
+ * docs/machine-plan.md, Phase 0 item 3. ---- */
+static int g_hud = 1;
+static const char *g_hud_prog = "";
+static z80_dbt_t *g_hud_dbt = NULL;
+
+static void hud_update(z80_cpu_t *cpu) {
+    static uint64_t last_insns; static struct timespec last_t; static int primed;
+    static double bips;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (primed) {
+        double dt = (double)(now.tv_sec - last_t.tv_sec) + (double)(now.tv_nsec - last_t.tv_nsec) / 1e9;
+        if (dt > 0) bips = (double)(cpu->insn_count - last_insns) / dt / 1e9;
+    }
+    last_insns = cpu->insn_count; last_t = now; primed = 1;
+    char line[128];
+    if (g_hud_dbt) {
+        double fb = cpu->insn_count ? 100.0 * (double)g_hud_dbt->interp_fallback_insns / (double)cpu->insn_count : 0.0;
+        snprintf(line, sizeof line, " %-12.12s %6.2f BIPS  blocks %-6llu fallback %5.2f%%  smc %-6llu  %s",
+                 g_hud_prog, bips, (unsigned long long)g_hud_dbt->blocks_translated, fb,
+                 (unsigned long long)g_hud_dbt->smc_invalidations,
+                 kaypro_kbd_scripted() ? "script" : "");
+    } else {
+        snprintf(line, sizeof line, " %-12.12s %6.2f BIPS  interpreter", g_hud_prog, bips);
+    }
+    kaypro_render_tty_set_hud(line);
+    kaypro_render_tty_flush(0);
+}
+
 static void host_event_dispatch(z80_cpu_t *cpu) {
     (void)cpu;
     sig_atomic_t pending = g_pending_signals;
@@ -61,7 +95,7 @@ static void host_event_dispatch(z80_cpu_t *cpu) {
         kaypro_render_tty_invalidate();
         kaypro_render_tty_flush(1);
     }
-    /* SIGALRM: the HUD timer, once there is a HUD. */
+    if (pending & (1u << SIGALRM)) hud_update(cpu);
 }
 
 static void install_signal_handlers(z80_cpu_t *cpu) {
@@ -125,6 +159,7 @@ static void usage(const char *prog) {
     printf("  -K       Kaypro terminal: console output goes to the 80x24 cell buffer\n");
     printf("  --screen-dump FILE  With -K, write the screen text to FILE on exit\n");
     printf("  --script FILE       Headless: keystrokes from FILE (implies -K); see kaypro/kaypro_kbd.h\n");
+    printf("  --no-hud            With -K on a terminal, don't show the BIPS line on host line 26\n");
     printf("  -h       This help\n\n");
     printf("Example:\n");
     printf("  %s tests/hello.com\n\n", prog);
@@ -170,6 +205,8 @@ int main(int argc, char **argv) {
             kaypro_term = 1;
         } else if (strcmp(argv[i], "--screen-dump") == 0 && i + 1 < argc) {
             screen_dump = argv[++i];
+        } else if (strcmp(argv[i], "--no-hud") == 0) {
+            g_hud = 0;
         } else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
             script = argv[++i];
             kaypro_term = 1;
@@ -295,6 +332,12 @@ int main(int argc, char **argv) {
         if (isatty(STDOUT_FILENO)) {
             kaypro_render_tty_init();
             atexit(kaypro_render_tty_shutdown);
+            if (g_hud) {
+                const char *base = strrchr(final_prog, '/');
+                g_hud_prog = base ? base + 1 : final_prog;
+                struct itimerval it = { {0, 250000}, {0, 250000} };
+                setitimer(ITIMER_REAL, &it, NULL);
+            }
         }
     }
 
@@ -316,6 +359,7 @@ int main(int argc, char **argv) {
             use_jit = 0;
         }
         if (dbt) dbt->verify = verify;
+        g_hud_dbt = dbt;
     }
 
     if (use_jit) {

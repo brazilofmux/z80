@@ -43,4 +43,14 @@ void kaypro_render_tty_invalidate(void);
 /* Nonzero once init has run and shutdown has not. */
 int kaypro_render_tty_active(void);
 
+/* The HUD: one line of host-terminal text painted on the line below the
+ * Kaypro's 25 (host line 26), dim, when the terminal has at least 26
+ * rows. NULL or "" removes it. Repainted on the next flush when the
+ * text changes. */
+void kaypro_render_tty_set_hud(const char *text);
+
+/* Host terminal size, from TIOCGWINSZ at init and on invalidate
+ * (SIGWINCH); tests set it directly. */
+void kaypro_render_tty_set_size(int rows, int cols);
+
 #endif /* KAYPRO_RENDER_TTY_H */

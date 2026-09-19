@@ -66,7 +66,7 @@ clean:
 	rm -f tools/mkhello tools/mkblock
 	rm -f tests/*.com tests/*.bin
 
-test: test-video test-render test-guest test-apps
+test: test-video test-render test-kbd test-guest test-apps
 
 # Guest-side tests: the generated .COMs under the interpreter, the JIT,
 # and lockstep verify. ports.com is the Phase 0 acceptance test (every
@@ -100,6 +100,13 @@ tests/video_test: tests/video_test.c kaypro/kaypro_video.c kaypro/kaypro_video.h
 	$(CC) $(CFLAGS) -o $@ tests/video_test.c kaypro/kaypro_video.c
 test-video: tests/video_test
 	./tests/video_test
+
+# Host-side test of the key decoder / key map.
+.PHONY: test-kbd
+tests/kbd_test: tests/kbd_test.c kaypro/kaypro_kbd.c kaypro/kaypro_video.c kaypro/kaypro_kbd.h
+	$(CC) $(CFLAGS) -o $@ tests/kbd_test.c kaypro/kaypro_kbd.c kaypro/kaypro_video.c
+test-kbd: tests/kbd_test
+	./tests/kbd_test
 
 # Host-side test of the terminal renderer (escape stream captured in memory).
 .PHONY: test-render

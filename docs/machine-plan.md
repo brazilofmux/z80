@@ -141,26 +141,32 @@ the Phase 2 BIOS both feed it.
   or if the cursor moved and the output burst ended; plus on the
   host-event flag. Bursts from a 4 BIPS program must not become 4 BIPS
   of terminal writes.
-- Host line 26 is the HUD (the Kaypro's own line 25 is its status line): current BIPS (from `insn_count` deltas over the
-  flush interval), blocks translated, fallback rate, drive activity.
-  `-H` toggles it; it is off when stdout is not a tty.
+- Host line 26 is the HUD (the Kaypro's own line 25 is its status
+  line): BIPS over the last quarter second, blocks translated, fallback
+  rate, SMC invalidations. **Done**: a 4 Hz SIGALRM through Phase 0's
+  host-event flag; `--no-hud` turns it off; it needs a 26-row terminal.
+  A pure compute loop that never traps shows its last figure until it
+  does (the back-edge check is the known fix, unmeasured).
 - Host terminal setup: raw mode is already there; add alternate screen
   on entry/exit, SIGWINCH handling (just repaint; the Kaypro is 80×24
   regardless), and a clean restore on any exit path including crashes.
 
 ### kaypro_kbd.c — keyboard
 
-- Host bytes/escape sequences → the bytes a Kaypro keyboard sent.
-  Arrows on the '84 keyboard sent `^K ^J ^H ^L`... verify; the numeric
-  keypad sent digits; the four function keys are user-programmable, so
-  give them a config table defaulting to WordStar-friendly sequences.
-  DEL and backspace both become `^H` unless configured otherwise.
-- Input queue with a `constat()` that does not touch the host until
-  the queue is empty, and **idle detection**: if CONST is polled N
-  times with no input, block in `poll()` for a millisecond. WordStar
-  spins on CONST between keystrokes; at 4 BIPS that is a full host
-  core doing nothing, and the polls would otherwise each cost a
-  syscall.
+- Host escape sequences → the bytes a Kaypro keyboard sent. **Done.**
+  The guide gives no factory table (CONFIG made every arrow and keypad
+  key user-definable), so the defaults are the ADM-3A cursor controls
+  `^K ^J ^H ^L`, Backspace (0x7F or 0x08 from the host) is the Kaypro
+  BACKSPACE `^H`, the Delete key is DEL; `Z80_KEYS=wordstar` gives
+  `^E ^X ^S ^D`, PgUp/PgDn `^R ^C`, Backspace = DEL (delete left),
+  Delete = `^G`; `Z80_KEYS="f1=\^KD,up=..."` sets any key. Unmapped
+  keys are swallowed whole. `make test-kbd`; verified through a pty
+  against WordStar's cursor.
+- Idle detection: after 20000 consecutive quiet polls (no console
+  output between them) each poll sleeps a millisecond. The threshold
+  sits above programs' own silent delay loops (WordStar paces "NEW
+  FILE" with ~16500 polls); at 64 those 1-second delays became 16
+  seconds. **Done.**
 
 ### Headless mode and tests — the reason for the cell buffer
 
