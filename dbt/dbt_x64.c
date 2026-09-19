@@ -1323,50 +1323,47 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
     case Z80_OP_ADD_HL_RR: {
         /* ADD HL,rr (or ADD IX,rr / ADD IY,rr under DD/FD).
          *   memptr = old dst + 1
-         *   dst   += src          (16-bit add: CF = carry out of bit 15,
-         *                          and the partial write keeps dst canonical)
-         *   F: S/Z/PV preserved; N=0; C; H = carry out of bit 11 via the
-         *      carry-recovery identity (bit 12 of a^b^sum); XY from the
-         *      result high byte. */
+         *   t      = dst + src        (32-bit: carry out of bit 15 lands
+         *                              at bit 16, nothing is masked)
+         *   dst    = t & 0xFFFF
+         *   F: S/Z/PV preserved; N=0; C|H|XY from ONE table lookup —
+         *      index = ((t ^ ((old ^ src) & 0x1000)) >> 8) is 9 bits:
+         *      bit 8 = C, bit 4 = H (carry-recovery identity), bits 5/3
+         *      = XY of the result high byte. See FT_ADD16. */
         int idx = (dec->prefix == 0xDD || dec->prefix == 0xFD);
         int dst = idx ? T1 : R_HL;
         if (idx) emit_movzx_r32_m16(e, T1, R_CPU, X64_NOREG, idx_reg_offset(dec->prefix));
 
-        int need_old = store_memptr || (fmask & Z80_FLAG_H);
-        if (need_old) emit_mov_r32_r32(e, T0, dst);              /* old dst */
+        int self = (dec->reg1 == 2);                      /* ADD HL,HL */
+        int src  = self ? dst : rr_host_p(dec->reg1, 0);
+        int want = fmask & (Z80_FLAG_C | Z80_FLAG_H | Z80_FLAG_5 | Z80_FLAG_3);
 
-        int src = (dec->reg1 == 2) ? dst : rr_host_p(dec->reg1, 0);
-        int c_live = (fmask & Z80_FLAG_C) != 0;
-        if (c_live) emit_alu_r32_r32(e, X64_ALU_XOR, T2, T2);
-        emit_alu_r16_r16(e, X64_ALU_ADD, dst, src);
-        if (c_live) emit_setcc_r8(e, X64_CC_C, T2);
-
+        emit_lea_r32(e, T3, dst, src, 0);                 /* t = old + src */
         if (store_memptr) {
-            emit_lea_r32(e, T3, T0, X64_NOREG, 1);
-            emit_mov_m16_r16(e, R_CPU, X64_NOREG, OFF_MEMPTR, T3);
+            emit_lea_r32(e, T2, dst, X64_NOREG, 1);       /* memptr = old + 1 */
+            emit_mov_m16_r16(e, R_CPU, X64_NOREG, OFF_MEMPTR, T2);
         }
+        if (want) {
+            if ((fmask & Z80_FLAG_H) && !self) {
+                /* old^old == 0 for ADD HL,HL, so the fix-up vanishes. */
+                emit_mov_r32_r32(e, T0, dst);
+                emit_alu_r32_r32(e, X64_ALU_XOR, T0, src);
+                emit_alu_r32_imm(e, X64_ALU_AND, T0, 0x1000);
+                emit_alu_r32_r32(e, X64_ALU_XOR, T0, T3);
+            } else {
+                emit_mov_r32_r32(e, T0, T3);
+            }
+            emit_shr_r32_imm(e, T0, 8);
+        }
+        emit_movzx_r32_r16(e, dst, T3);                   /* dst = t & 0xFFFF */
         if (idx)
             emit_mov_m16_r16(e, R_CPU, X64_NOREG, idx_reg_offset(dec->prefix), T1);
 
         if (fmask & 0x3B) {   /* writes C|H|N|XY; S/Z/PV pass through */
             emit_alu_r32_imm(e, X64_ALU_AND, R_F, Z80_FLAG_S | Z80_FLAG_Z | Z80_FLAG_PV);
-            if (fmask & Z80_FLAG_H) {
-                /* For ADD HL,HL `src` is the (already updated) dst, but
-                 * old^old == 0 so using T0 twice is exactly right. */
-                emit_mov_r32_r32(e, T3, T0);
-                emit_alu_r32_r32(e, X64_ALU_XOR, T3, (dec->reg1 == 2) ? T0 : src);
-                emit_alu_r32_r32(e, X64_ALU_XOR, T3, dst);
-                emit_alu_r32_imm(e, X64_ALU_AND, T3, 0x1000);
-                emit_shr_r32_imm(e, T3, 8);
-                emit_alu_r32_r32(e, X64_ALU_OR, R_F, T3);
-            }
-            if (c_live)
-                emit_alu_r32_r32(e, X64_ALU_OR, R_F, T2);
-            if (fmask & (Z80_FLAG_5 | Z80_FLAG_3)) {
-                emit_mov_r32_r32(e, T3, dst);
-                emit_shr_r32_imm(e, T3, 8);
-                emit_alu_r32_imm(e, X64_ALU_AND, T3, Z80_FLAG_5 | Z80_FLAG_3);
-                emit_alu_r32_r32(e, X64_ALU_OR, R_F, T3);
+            if (want) {
+                emit_movzx_r32_m8(e, T0, R_AUX, T0, FT_ADD16);
+                emit_alu_r32_r32(e, X64_ALU_OR, R_F, T0);
             }
         }
         return OP_SETS_F_INLINE;
@@ -1966,6 +1963,12 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
         .offset   = dbt->code_used,
         .capacity = CODE_BUF_SIZE,
     };
+    /* Align block entries to 16 bytes (the padding is never executed).
+     * Measured: without this, unrelated code-size changes shuffle every
+     * later block's fetch-window alignment and swing SQUARO by +-4% —
+     * enough to invert the verdict on a real optimization. With it, the
+     * run-to-run spread on SQUARO drops to ~1% and zexdoc gains ~5%. */
+    while (e.offset & 15) emit_int3(&e);
     uint8_t *entry = dbt->code_buf + e.offset;
     s_nslow = 0;
 

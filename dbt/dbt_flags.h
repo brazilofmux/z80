@@ -38,6 +38,16 @@ void z80_flag_tables_init(void);
 #define DAA_TABLE_LEN 0x1400
 extern uint16_t z80_daa_table[DAA_TABLE_LEN];
 
+/* 16-bit ADD flag table (ADD HL,rr): after a 32-bit add t = a + b, the
+ * carry sits at bit 16 and the result's XY bits at 13/11; xoring in
+ * ((a ^ b) & 0x1000) turns bit 12 into the half carry (carry-recovery
+ * identity). Shift right 8 and the 9-bit value v indexes this table:
+ *   z80_add16_table[v] = (v & (H|5|3)) | (v >> 8)     = H | XY | C
+ * Follows the DAA table in the aux pad. */
+#define FT_ADD16        (FT_DAA + DAA_TABLE_LEN * 2)
+#define ADD16_TABLE_LEN 512
+extern uint8_t z80_add16_table[ADD16_TABLE_LEN];
+
 /* 8-bit ALU writing A. ADC/SBC also read the carry input from cpu->f.
  * NOTE: both backends emit these inline (see emit_alu_inline in
  * dbt_a64.c / dbt_x64.c); the helpers remain as the reference

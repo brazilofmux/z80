@@ -28,6 +28,7 @@ static inline uint8_t parity8(uint8_t v) {
  * Layout (dbt_flags.h): LOGIC +0, SZXY +256, INC +512, DEC +768. */
 uint8_t  z80_f_tables[1024];
 uint16_t z80_daa_table[DAA_TABLE_LEN];
+uint8_t  z80_add16_table[ADD16_TABLE_LEN];
 
 /* One DAA step on (a, f) — the shared reference used by both the helper
  * and the table builder. Mirrors the Z80_OP_DAA case in core/z80_interp.c. */
@@ -60,6 +61,8 @@ static void daa_compute(uint8_t a, uint8_t fin, uint8_t *a_out, uint8_t *f_out) 
 }
 
 void z80_flag_tables_init(void) {
+    for (int v = 0; v < ADD16_TABLE_LEN; v++)
+        z80_add16_table[v] = (uint8_t)((v & (Z80_FLAG_H | Z80_FLAG_5 | Z80_FLAG_3)) | (v >> 8));
     for (int i = 0; i < DAA_TABLE_LEN; i++) {
         uint8_t a = (uint8_t)i;
         uint8_t f = (uint8_t)((i >> 8) & (Z80_FLAG_C | Z80_FLAG_N | Z80_FLAG_H));

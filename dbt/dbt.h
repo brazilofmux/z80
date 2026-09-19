@@ -114,6 +114,7 @@ typedef struct {
      *   +0x00000  jit_ftables  — copy of z80_f_tables (result-indexed
      *                            flag bytes; see dbt_flags.h)
      *   +0x00400  DAA table    — copy of z80_daa_table, in the pad
+     *   +0x02C00  ADD16 table  — copy of z80_add16_table (ADD HL,rr flags)
      *   +0x10000  code_bitmap  — reached via ADD #16, LSL#12
      *   +0x20000  cache        — reached via ADD #32, LSL#12
      * The members must stay in this order with these exact sizes; the

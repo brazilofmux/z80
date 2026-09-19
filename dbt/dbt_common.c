@@ -47,6 +47,10 @@ int dbt_init(z80_dbt_t *dbt, z80_cpu_t *cpu) {
                    && FT_DAA + sizeof(z80_daa_table) <= 0x10000,
                    "DAA table must fit between jit_ftables and code_bitmap");
     memcpy((uint8_t *)dbt->jit_ftables + FT_DAA, z80_daa_table, sizeof(z80_daa_table));
+    memcpy((uint8_t *)dbt->jit_ftables + FT_ADD16, z80_add16_table, sizeof(z80_add16_table));
+    _Static_assert(FT_ADD16 >= FT_DAA + sizeof(z80_daa_table)
+                   && FT_ADD16 + sizeof(z80_add16_table) <= 0x10000,
+                   "ADD16 table must fit between the DAA table and code_bitmap");
     dbt_cache_invalidate_all(dbt);
 
     dbt->code_buf = mmap(NULL, CODE_BUF_SIZE,
