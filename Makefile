@@ -66,7 +66,7 @@ clean:
 	rm -f tools/mkhello tools/mkblock
 	rm -f tests/*.com tests/*.bin
 
-test: test-video test-render test-kbd test-guest test-apps
+test: test-video test-render test-kbd test-guest test-sort test-apps
 
 # Guest-side tests: the generated .COMs under the interpreter, the JIT,
 # and lockstep verify. ports.com is the Phase 0 acceptance test (every
@@ -148,6 +148,17 @@ floppies: tools/mkdsk
 	   ./tools/mkdsk -f fd disks/b.dsk $$b disks/LETTER.TXT | sed 's/^/  B: /'; \
 	 else echo "  B: skipped — no disks/wordstar/WS.COM"; fi
 	@rm -f disks/README.TXT disks/LETTER.TXT
+
+# SORT.COM: an external sort for CP/M 2.2 in Z80 assembly (cpm/sort/),
+# DFSORT-style decks; tests/sort.sh checks it against a Python reference.
+cpm/sort/SORT.COM: cpm/sort/sort.asm
+	@test -x $(ASL) || { echo "need $(ASL): run tools/get-asl.sh"; exit 1; }
+	$(ASL) -q -o cpm/sort/sort.p -L -OLIST cpm/sort/sort.lst cpm/sort/sort.asm
+	$(P2BIN) -q -l '$$00' -r '$$100-$$' cpm/sort/sort.p cpm/sort/SORT.COM
+.PHONY: sort test-sort
+sort: cpm/sort/SORT.COM
+test-sort: cpm/sort/SORT.COM
+	@sh tests/sort.sh
 
 # Disk image tool (tools/mkdsk.c): make, fill, list, extract z80m images.
 tools/mkdsk: tools/mkdsk.c

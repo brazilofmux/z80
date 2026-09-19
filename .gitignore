@@ -58,3 +58,9 @@ tools/mkdsk
 disks/work.dsk
 disks/a.dsk
 disks/b.dsk
+
+# SORT.COM is built from cpm/sort/sort.asm
+cpm/sort/*.p
+cpm/sort/*.lst
+cpm/sort/SORT.COM
+tests/scripts/sortwork/
