@@ -79,8 +79,10 @@ int main(void) {
 
     const uint8_t data[4] = { 0x11, 0x22, 0x33, 0x44 };
     memcpy(code + (DATA - ORG), data, 4);
-    strcpy((char *)code + (MSG_OK - ORG),   "PORT I/O OK\r\n$");
-    strcpy((char *)code + (MSG_FAIL - ORG), "PORT I/O FAIL\r\n$");
+    /* CP/M strings end at '$'; no NUL — MSG_FAIL's would land one byte
+     * past the 256-byte array (macOS's fortified strcpy aborts on it). */
+    memcpy(code + (MSG_OK - ORG),   "PORT I/O OK\r\n$",   14);
+    memcpy(code + (MSG_FAIL - ORG), "PORT I/O FAIL\r\n$", 16);
 
     FILE *f = fopen("tests/ports.com", "wb");
     if (!f) { perror("tests/ports.com"); return 1; }
