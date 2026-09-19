@@ -23,6 +23,13 @@
  *                       delays: WordStar paces "NEW FILE" with ~16500
  *                       silent CONST polls, and a quiet run that long
  *                       costs a few milliseconds at guest speed
+ *   @pace N             from here on, hand the guest at most one byte
+ *                       per N empty polls: after a key is read, the
+ *                       next one is withheld until the guest has asked
+ *                       N times and been told "nothing". For programs
+ *                       that purge type-ahead after every keystroke
+ *                       (dBASE II reads and discards whatever is
+ *                       queued before echoing); @pace 0 turns it off
  *   @sleep MS           wall-clock pause
  *   @dump FILE [attrs]  write the screen (kaypro_video_dump) now; "-" is
  *                       stdout; a relative FILE is placed next to the

@@ -93,6 +93,7 @@ test-guest: $(TARGET) $(GUEST_TESTS)
 test-apps: $(TARGET)
 	@tests/zork.sh jit
 	@tests/wordstar.sh jit
+	@tests/dbase.sh jit
 
 # Host-side unit test of the Kaypro screen model (no Z80 involved).
 .PHONY: test-video

@@ -3,7 +3,9 @@
 # Usage: tests/zork.sh [jit|interp|verify]
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/.." && pwd)
+# The file's case depends on how it was copied in (Linux is case-sensitive).
 Z="$ROOT/disks/zork1/zork1.com"
+[ -f "$Z" ] || Z="$ROOT/disks/zork1/ZORK1.COM"
 [ -f "$Z" ] || { echo "zork: skipped (no $Z)"; exit 0; }
 case "${1:-jit}" in
     jit) FLAG=-j ;; interp) FLAG=-i ;; verify) FLAG=-V; export Z80_VERIFY_STRICT=1 ;;

@@ -124,6 +124,34 @@ static int get_file_slot_from_fcb(uint16_t fcb_addr)
     return -1;
 }
 
+/* Slot for an I/O call on this FCB. CP/M's CLOSE only flushes the
+ * directory entry; the FCB stays valid and programs keep reading and
+ * writing through it afterwards (dBASE II creates a file, closes it,
+ * and USEs it through the same FCB without re-opening). A closed slot
+ * is therefore re-opened here, by the FCB's own name, with the FCB's
+ * record position; RC is left as the program last saw it. */
+static int slot_for_io(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    int slot = get_file_slot_from_fcb(fcb_addr);
+    if (slot >= 0) return slot;
+
+    uint8_t *fcb = &cpu->mem[fcb_addr];
+    char host_name[64], full[PATH_MAX];
+    fcb_to_host_name(fcb, host_name, sizeof(host_name));
+    make_host_path(host_name, full, sizeof(full));
+    FILE *fp = fopen(full, "r+b");
+    if (!fp) return -1;
+    slot = alloc_file_slot();
+    if (slot < 0) { fclose(fp); return -1; }
+    open_files[slot].fp = fp;
+    memcpy(open_files[slot].fcb_copy, fcb, CPM_FCB_SIZE);
+    open_fcb_addr[slot] = fcb_addr;
+    open_files[slot].logical_record = (uint16_t)fcb_record_pos(fcb);
+    if (cpm_debug)
+        fprintf(stderr, "  [reopen] %s through FCB@%04X after CLOSE\n", host_name, fcb_addr);
+    return slot;
+}
+
 /* Extract 24-bit random record number from FCB (offsets 33-35) */
 static uint32_t get_random_record(const uint8_t *fcb)
 {
@@ -276,7 +304,7 @@ int cpm_bdos_close_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = get_file_slot_from_fcb(fcb_addr);
+    int slot = slot_for_io(cpu, fcb_addr);
     if (slot < 0) {
         cpu->a = 1;
         return 1;
@@ -314,7 +342,7 @@ int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = get_file_slot_from_fcb(fcb_addr);
+    int slot = slot_for_io(cpu, fcb_addr);
     if (slot < 0) {
         cpu->a = 1;
         return 1;
@@ -359,7 +387,7 @@ int cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = get_file_slot_from_fcb(fcb_addr);
+    int slot = slot_for_io(cpu, fcb_addr);
     if (slot < 0) {
         cpu->a = 1; /* error */
         return 1;
@@ -411,7 +439,7 @@ int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_random_write(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    int slot = get_file_slot_from_fcb(fcb_addr);
+    int slot = slot_for_io(cpu, fcb_addr);
     if (slot < 0) {
         cpu->a = 1;
         return 1;

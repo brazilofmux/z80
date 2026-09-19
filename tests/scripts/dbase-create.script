@@ -1,0 +1,33 @@
+# dBASE II 2.41 smoke test: create TEST.DBF, add two records, display
+# them, quit. Run by tests/dbase.sh. dBASE purges type-ahead after each
+# key, so keys are paced.
+@pace 2
+@wait-idle
+\r
+@wait-idle
+CREATE TEST\r
+@wait-idle
+NAME,C,10\r
+@wait-idle
+QTY,N,5\r
+@wait-idle
+\r
+@wait-idle
+N\r
+@wait-idle
+USE TEST\r
+@wait-idle
+APPEND BLANK\r
+@wait-idle
+REPLACE NAME WITH 'MONSTER',QTY WITH 10\r
+@wait-idle
+APPEND BLANK\r
+@wait-idle
+REPLACE NAME WITH 'KAYPRO',QTY WITH 4\r
+@wait-idle
+DISPLAY ALL\r
+@wait-idle
+@dump dbase-display.dump
+QUIT\r
+@wait-idle
+@end

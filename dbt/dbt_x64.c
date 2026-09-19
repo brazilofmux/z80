@@ -155,6 +155,13 @@ int dbt_jit_available(void) { return 1; }
  * ---------------------------------------------------------------------- */
 static int s_use_ras = -1;
 
+/* Z80_VERIFY_STRICT=1 under -V: every block returns to dbt_run — no
+ * direct links, no inline cache probe, no RAS pairing — so the lockstep
+ * comparison runs after every block instead of after every chained run.
+ * Slow, and the way to localise a divergence to one block. Decided at
+ * the first translation (dbt->verify is set after dbt_init). */
+static int s_strict_exit = -1;
+
 /* Guest CALLs between forced unwinds: bounds host-stack growth from
  * CALLs that never RET (16 bytes each) to RAS_CALL_BUDGET * 16 bytes. */
 #define RAS_CALL_BUDGET (32u * 1024u)
@@ -563,6 +570,10 @@ static void emit_tail_prologue(emit_t *e, uint32_t insn_count_delta, int q_mode)
  * miss: jmp exit_stub
  * The cache index is exactly `pc` since BLOCK_CACHE_MASK == 0xFFFF. */
 static void emit_dynamic_tail(emit_t *e, uint32_t exit_stub_off) {
+    if (s_strict_exit > 0) {
+        emit_jmp_rel32_to(e, exit_stub_off);
+        return;
+    }
     emit_mov_r32_r32(e, T1, T0);
     emit_shl_r32_imm(e, T1, 4);
     emit_cmp_m32_r32(e, R_AUX, T1, AUX_CACHE_OFF, T0);
@@ -586,6 +597,10 @@ static void emit_dynamic_tail(emit_t *e, uint32_t exit_stub_off) {
  * — a direct link without a record could never be unpatched after SMC. */
 static void emit_edge(z80_dbt_t *dbt, emit_t *e, uint16_t pc) {
     emit_mov_r32_imm32(e, T0, pc);
+    if (s_strict_exit > 0) {
+        emit_dynamic_tail(e, dbt->exit_stub_off);
+        return;
+    }
     uint32_t site = e->offset;
     int linked = 0;
     if (dbt_link_record(dbt, pc, site)) {
@@ -626,7 +641,7 @@ static void emit_edge(z80_dbt_t *dbt, emit_t *e, uint16_t pc) {
  * the instruction after the CALL; dbt_arch_patch_link tells the two
  * site kinds apart by opcode byte (E8 vs E9). */
 static void emit_call_edge(z80_dbt_t *dbt, emit_t *e, uint16_t target, uint16_t pc_after) {
-    if (!s_use_ras) {
+    if (!s_use_ras || s_strict_exit > 0) {
         emit_edge(dbt, e, target);
         return;
     }
@@ -667,7 +682,7 @@ static void emit_call_edge(z80_dbt_t *dbt, emit_t *e, uint16_t target, uint16_t 
  *   cmp  [rsp+8], eax ; jne .miss ; ret
  * .miss: mov rsp, [cpu->jit_sp_base] ; <dynamic tail> */
 static void emit_ret_tail(emit_t *e, uint32_t exit_stub_off) {
-    if (s_use_ras) {
+    if (s_use_ras && s_strict_exit <= 0) {
         emit_cmp_m32_r32(e, X64_RSP, X64_NOREG, 8, T0);
         emit_jcc_rel8(e, X64_CC_NE, 1);
         emit_ret(e);
@@ -1950,6 +1965,8 @@ static void emit_branch_ender(z80_dbt_t *dbt, emit_t *e,
 }
 
 uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
+    if (s_strict_exit < 0)
+        s_strict_exit = dbt->verify && getenv("Z80_VERIFY_STRICT") != NULL;
     if (dbt->code_used + 65536 > CODE_BUF_SIZE) {
         /* Out of JIT space — blow away the cache and reset the cursor. */
         dbt_cache_invalidate_all(dbt);

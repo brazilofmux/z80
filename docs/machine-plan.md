@@ -46,7 +46,8 @@ proves them wrong):
 - Software on hand (all in `disks/`, git-ignored): zexdoc/zexall,
   MS-COBOL 4.65, Zork 1, WordStar 3.00 (INSTALLed for ADM-3A: creates,
   edits and saves documents under the shim), dBASE II 2.41 (INSTALLed
-  for Kaypro II: reaches its dot prompt), Turbo Pascal 3.00A (already
+  for Kaypro II: creates a database, appends, replaces and displays
+  records, `tests/dbase.sh`), Turbo Pascal 3.00A (already
   installed "Kaypro with hilite": reaches its menu), MBASIC 5.2x, BBC
   BASIC, M80/L80. No CP/M system files yet — see *Sourcing*.
 
@@ -189,9 +190,20 @@ the Phase 2 BIOS both feed it.
   once and every disk operation happens once. The shadow runs with
   `defer_traps` so it stops *at* a trap address the way a translated
   block does. `Z80_VERIFY_STRICT=1` makes every block return to the
-  dispatcher (no links, no inline probe) so a divergence is localised
-  to one block — that is how the overlay bug below was found in
-  minutes. The WordStar edit-and-save session verifies clean.
+  dispatcher (no links, no inline probe, and on x86-64 no RAS pairing)
+  so a divergence is localised to one block — that is how the overlay
+  bug below was found in minutes. Both backends have it. The WordStar
+  and dBASE sessions verify clean under it on both.
+- **Scripts need pacing for programs that purge type-ahead.** dBASE II
+  reads a key, then drains and discards everything else queued before
+  echoing — at human speed invisible, from a script it ate all but the
+  first byte of every line. `@pace N` withholds the next key until the
+  guest has polled empty N times since the last read.
+- **I/O through a closed FCB is normal CP/M.** CLOSE only flushes the
+  directory; dBASE creates a file, closes it, and USEs it through the
+  same FCB with no re-open. The shim re-opens implicitly by the FCB's
+  name when I/O arrives on an FCB with no live slot. The Phase 2 BDOS
+  is DRI's, so this class of shim bug ends there.
 - **Host writes must invalidate translated code.** BDOS reads land in
   the DMA buffer behind the JIT's store check; WordStar reloads overlay
   segments into the same addresses, and a translated block for the old

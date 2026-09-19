@@ -230,7 +230,7 @@ static int host_fetch(int block) {
 
 /* ---- script source ---------------------------------------------------- */
 
-typedef enum { ST_BYTES, ST_WAIT_IDLE, ST_SLEEP, ST_DUMP, ST_MEM, ST_END } step_kind;
+typedef enum { ST_BYTES, ST_WAIT_IDLE, ST_SLEEP, ST_DUMP, ST_MEM, ST_PACE, ST_END } step_kind;
 typedef struct {
     step_kind kind;
     uint8_t  *bytes;   /* ST_BYTES */
@@ -246,6 +246,8 @@ static size_t   step_off;                /* ST_BYTES: bytes already queued */
 static long     idle_target;             /* ST_WAIT_IDLE: consecutive empty polls still needed */
 static long     idle_wanted;             /* ... and the full count, to restart from on output */
 static int      idle_armed;
+static long     pace_polls;              /* @pace N: empty polls required between keys */
+static long     polls_since_read;
 
 /* Console output: the guest is not idle. Restarts a pending wait-idle,
  * because "idle" means no output between polls — WordStar repaints a
@@ -324,6 +326,7 @@ int kaypro_kbd_script_load(const char *path) {
             sscanf(line + 1, "%31s %1023[^\n]", cmd, arg);
             if (!strcmp(cmd, "wait-idle")) { step_t *s = add_step(ST_WAIT_IDLE); s->arg = arg[0] ? atol(arg) : KBD_WAIT_IDLE_DEFAULT; }
             else if (!strcmp(cmd, "sleep")) { step_t *s = add_step(ST_SLEEP); s->arg = atol(arg); }
+            else if (!strcmp(cmd, "pace"))  { step_t *s = add_step(ST_PACE);  s->arg = atol(arg); }
             else if (!strcmp(cmd, "dump"))  {
                 step_t *s = add_step(ST_DUMP);
                 char *sp = strchr(arg, ' ');
@@ -384,6 +387,10 @@ static int script_advance(int reading) {
             usleep((useconds_t)(s->arg * 1000));
             cur_step++;
             continue;
+        case ST_PACE:
+            pace_polls = s->arg;
+            cur_step++;
+            continue;
         case ST_DUMP:
             do_dump(s->path, (int)s->arg);
             cur_step++;
@@ -415,12 +422,24 @@ static int script_advance(int reading) {
 
 /* ---- the three primitives ------------------------------------------- */
 
+/* Scripted pacing: a queued byte is withheld until the guest has polled
+ * empty pace_polls times since it last read one. */
+static int paced_out(void) {
+    if (!scripted || pace_polls <= 0 || polls_since_read >= pace_polls) return 0;
+    polls_since_read++;
+    return 1;
+}
+
 int kaypro_kbd_poll(void) {
     n_polls++;
-    if (!q_empty()) { empty_polls = 0; return 1; }
+    if (!q_empty()) {
+        if (paced_out()) return 0;
+        empty_polls = 0;
+        return 1;
+    }
     if (scripted) {
         int r = script_advance(0);
-        if (r == 1) { empty_polls = 0; return 1; }
+        if (r == 1) { if (paced_out()) return 0; empty_polls = 0; return 1; }
         /* Waiting for idle: this empty poll is what we're counting. */
         if (r == 0 && idle_armed) idle_target--;
         empty_polls++;
@@ -449,6 +468,7 @@ int kaypro_kbd_poll(void) {
 int kaypro_kbd_read(void) {
     n_reads++;
     empty_polls = 0;
+    polls_since_read = 0;
     if (!q_empty()) return q_pop();
     if (scripted) {
         int r = script_advance(1);
