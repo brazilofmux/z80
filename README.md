@@ -6,6 +6,27 @@ A ridiculously overpowered Z80 + CP/M execution environment, built for the sheer
 
 No good reason. Maximum vibes.
 
+## Quick start
+
+```bash
+git clone https://github.com/brazilofmux/z80.git && cd z80
+make                                          # the emulator, plus tools/mkdsk
+make tests/hello.com                          # a tiny generated .COM to have something on the disk
+./tools/mkdsk -f fd boot.dsk tests/hello.com  # a 400K CP/M floppy image (-f hd: an 8 MB hard disk)
+./z80-monster -j -K -A boot.dsk               # boots CP/M 2.2 on it; ^] quits
+```
+
+```
+62K CP/M 2.2 on the z80-monster
+A>DIR
+A: HELLO    COM
+A>HELLO
+Hello from the 10 BIPS future!
+A>
+```
+
+That is Digital Research's real CP/M 2.2 — the CCP and BDOS assembled byte-exact from the released sources (`cpm/cpm22/`, under the 2022 license in `LICENSE.txt` there) — on a BIOS of ours, and it ships in the repo. What doesn't ship is anything to run on it: WordStar, dBASE II, Turbo Pascal, MS-COBOL and the rest are still someone's copyright, so bring your own `.COM` files and put them on an image with `tools/mkdsk IMAGE FILE...` (or cpmtools, using `tools/diskdefs`). `make test` runs everything that needs no such software; the application tests skip until you drop copies into `disks/` (see the `disks/` note under Layout). Linux/aarch64 and x86-64 build the same way; macOS needs nothing beyond Xcode's command-line tools.
+
 ## Measured Performance
 
 Single core, JIT unless noted:

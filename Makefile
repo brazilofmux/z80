@@ -43,7 +43,7 @@ TARGET = z80-monster
 
 .PHONY: all clean test dirs
 
-all: dirs $(TARGET)
+all: dirs $(TARGET) tools/mkdsk
 	@echo "Built $(TARGET) for $(UNAME_M)"
 	@echo "Run with: ./$(TARGET) -h   (once we have something to run)"
 
