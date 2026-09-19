@@ -229,6 +229,13 @@ static int host_fetch(int block) {
     int queued = 0;
     for (size_t i = 0; i < len; ) {
         size_t seqlen = 1;
+        if (buf[i] == 0x1D) {
+            /* ^] leaves the emulator, the way it leaves telnet: a native
+             * CP/M session has no other way out (the CCP never exits),
+             * and the atexit chain restores the terminal. */
+            fprintf(stderr, "\n[exit] ^] pressed\n");
+            exit(0);
+        }
         if (buf[i] == 0x1B && i + 1 < len && (buf[i + 1] == '[' || buf[i + 1] == 'O')) {
             /* CSI: parameters then a final byte 0x40..0x7E; SS3: one byte. */
             seqlen = 2;
