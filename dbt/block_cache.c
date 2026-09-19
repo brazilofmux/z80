@@ -111,7 +111,10 @@ void dbt_mark_block_bytes(z80_dbt_t *dbt, uint16_t start, uint32_t end) {
     }
 }
 
+uint32_t *dbt_smc_hist;   /* Z80_CODEMAP: stores into code bytes, by address */
+
 static void dbt_invalidate_for_store(z80_dbt_t *dbt, uint16_t addr) {
+    if (dbt_smc_hist) dbt_smc_hist[addr]++;
     /* Invalidate cache entries whose start PC falls in the window
      * [addr - max_block_bytes + 1, addr] — any of them might cover byte
      * `addr`. The window is sized to the actual longest translated block,
@@ -119,13 +122,10 @@ static void dbt_invalidate_for_store(z80_dbt_t *dbt, uint16_t addr) {
      * short basic blocks (typical CP/M) pay far less per store than a
      * fixed 320-byte sweep would cost.
      *
-     * We do NOT touch the bitmap here: clearing it would let a subsequent
-     * store on the same byte silently skip the helper (false negative),
-     * which is exactly the stale-translation bug zexdoc's repeated
-     * test_op patching hit. False positives (bitmap still 1 for a byte
-     * whose block was just invalidated; next store fires the helper
-     * unnecessarily, helper sees the cache slot already empty and does
-     * no extra work) are the price. */
+     * The bitmap byte is cleared at the end, once every covering block
+     * has been invalidated (see there); clearing more than that byte,
+     * or clearing it before the sweep, is the stale-translation bug
+     * zexdoc's repeated test_op patching once hit. */
     uint32_t window = dbt->max_block_bytes;
     for (uint32_t k = 0; k < window; k++) {
         uint16_t p = (uint16_t)(addr - k);
@@ -145,6 +145,13 @@ static void dbt_invalidate_for_store(z80_dbt_t *dbt, uint16_t addr) {
         dbt_links_repatch(dbt, p, NULL);
     }
     dbt->smc_invalidations++;
+    /* Every block that covered this byte is gone now, and translating
+     * one again re-marks it (dbt_mark_block_bytes), so the byte can
+     * drop out of the bitmap: the next store to it skips the sweep.
+     * (The cache is 1:1, so no covering block can be hiding evicted.)
+     * MS-COBOL's generated code patches a few operand bytes millions
+     * of times a job; without this each store paid the window sweep. */
+    dbt->code_bitmap[addr & 0xFFFF] = 0;
 }
 
 /* Public wrapper for every interp / cpm memory write. JIT-translated

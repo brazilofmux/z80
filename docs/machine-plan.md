@@ -243,13 +243,23 @@ program's WORKING-STORAGE, while the same lines paced by `@wait-idle`
 were fine. Probably the MS-COBOL run-time's own console handling, but
 worth a look with `-V` before blaming the guest.
 
+SMC note (2026-09-19): MS-COBOL's generated code patches a few of
+its own operand bytes millions of times a job. Each such store swept
+the invalidation window even after the covering block was gone, since
+the code bitmap was never cleared; a batch of 33 G instructions spent
+40 of its 50 s there. A bitmap byte is now cleared once every block
+covering it has been invalidated (translation re-marks it), and the
+batch runs in 8.5 s. `Z80_CODEMAP=1` prints the code-bitmap ranges and
+the top SMC store targets with the exit stats.
+
 A first real batch workload now exists outside this repo: the MVS
 COBOL reports of a bookkeeping project ported to MS-COBOL 4.65 and run
 on our CP/M 2.2 from disk images built on the fly (external sort in
 COBOL, DFSORT-style decks, job streams as `--script` files). Two sorts
 plus two report programs over a few hundred records cost 1.15 G
 instructions and run at 4.7 BIPS; the same job lockstep-verifies
-clean. Its 57K-record sort will be the next stress test.
+clean. The whole month-end (twelve reports, 55K-line sorts in a Z80
+assembly SORT.COM) is 33.6 G instructions in 8.5 s.
 
 ### Layout and pieces
 

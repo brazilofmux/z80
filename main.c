@@ -383,6 +383,10 @@ int main(int argc, char **argv) {
     enter_raw_mode();
     atexit(leave_raw_mode);
     kaypro_kbd_attach(&cpu);
+    if (getenv("Z80_CODEMAP")) {
+        extern uint32_t *dbt_smc_hist;
+        dbt_smc_hist = calloc(0x10000, sizeof(uint32_t));
+    }
     if (getenv("Z80_PROFILE")) {
         z80_profile_counts = calloc(65536, sizeof *z80_profile_counts);
         if (use_jit) fprintf(stderr, "Z80_PROFILE counts interpreter steps only; use -i for the whole run\n");

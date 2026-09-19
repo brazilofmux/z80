@@ -379,6 +379,30 @@ void dbt_print_stats(z80_dbt_t *dbt, FILE *out) {
             (unsigned long long)dbt->loops_folded);
     fprintf(out, "  SMC invalidations:      %llu\n",
             (unsigned long long)dbt->smc_invalidations);
+    if (getenv("Z80_CODEMAP")) {
+        extern uint32_t *dbt_smc_hist;
+        if (dbt_smc_hist) {
+            fprintf(stderr, "  top SMC store targets:");
+            for (int n = 0; n < 12; n++) {
+                unsigned best = 0;
+                for (unsigned a = 1; a < 0x10000; a++) if (dbt_smc_hist[a] > dbt_smc_hist[best]) best = a;
+                if (!dbt_smc_hist[best]) break;
+                fprintf(stderr, " %04X:%u", best, dbt_smc_hist[best]);
+                dbt_smc_hist[best] = 0;
+            }
+            fprintf(stderr, "\n");
+        }
+        /* Which guest bytes the translator has marked as code, as
+         * ranges: what an SMC storm is hitting. */
+        fprintf(stderr, "  code bitmap ranges:");
+        int in = 0; unsigned start = 0;
+        for (unsigned a = 0; a <= 0x10000; a++) {
+            int c = a < 0x10000 && dbt->code_bitmap[a];
+            if (c && !in) { start = a; in = 1; }
+            if (!c && in) { fprintf(stderr, " %04X-%04X", start, a - 1); in = 0; }
+        }
+        fprintf(stderr, "\n");
+    }
     fprintf(out, "  links created/patched/unpatched: %llu / %llu / %llu\n",
             (unsigned long long)dbt->links_created,
             (unsigned long long)dbt->links_patched,
