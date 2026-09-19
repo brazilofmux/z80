@@ -423,3 +423,75 @@ uint8_t z80_jit_port_in(z80_cpu_t *cpu, uint8_t port, uint8_t high) {
 void z80_jit_port_out(z80_cpu_t *cpu, uint8_t port, uint8_t high, uint8_t val) {
     if (cpu->port_out) cpu->port_out(cpu, port, high, val);
 }
+
+/* ---- copy / fill loops ------------------------------------------------ */
+
+/* Invalidate every cached block covering a byte of [lo, lo+len) — the
+ * LDIR sweep for a forward range. */
+static void smc_sweep_forward(z80_cpu_t *cpu, uint16_t lo, uint32_t len) {
+    if (!cpu->dbt || len == 0) return;
+    z80_dbt_t *dbt = (z80_dbt_t *)cpu->dbt;
+    int any_code = 0;
+    for (uint32_t i = 0; i < len; i++)
+        if (dbt->code_bitmap[(uint16_t)(lo + i)]) { any_code = 1; break; }
+    if (!any_code) return;
+    uint32_t window = dbt->max_block_bytes;
+    uint32_t total = len + window;
+    for (uint32_t k = 0; k < total; k++) {
+        uint16_t p = (uint16_t)(lo + k - window + 1);
+        z80_block_entry_t *e = &dbt->cache[p & BLOCK_CACHE_MASK];
+        if (e->guest_pc == BLOCK_EMPTY_PC) continue;
+        uint32_t gap = (window - 1 > k) ? (window - 1 - k) : 0;
+        if (gap >= e->span) continue;
+        e->guest_pc    = BLOCK_EMPTY_PC;
+        e->native_code = NULL;
+        dbt_links_repatch(dbt, p, NULL);
+    }
+    dbt->smc_invalidations++;
+}
+
+static uint8_t *counter_reg(z80_cpu_t *cpu, unsigned code) {
+    switch (code) {
+    case 0: return &cpu->b; case 1: return &cpu->c;
+    case 2: return &cpu->d; case 3: return &cpu->e;
+    default: return NULL;
+    }
+}
+
+static void loop_epilogue(z80_cpu_t *cpu, uint8_t *cnt, uint32_t n, uint32_t spec, uint16_t pc) {
+    *cnt = 0;
+    cpu->f = (uint8_t)((cpu->f & Z80_FLAG_C) | z80_f_tables[FT_DEC + 0]);  /* the last DEC: 1 -> 0 */
+    if (!(spec & 0x200) || n >= 2) cpu->memptr = pc;
+    cpu->q = 0;                                  /* the branch was the last instruction */
+}
+
+/* LD A,(HL); LD (DE),A; INC HL; INC DE; DEC r; JP/JR NZ  (or (DE)->(HL)) */
+void z80_jit_loop_copy(z80_cpu_t *cpu, uint32_t spec, uint16_t pc) {
+    uint8_t *cnt = counter_reg(cpu, spec & 7);
+    uint32_t n = *cnt ? *cnt : 256;
+    int dir = (spec >> 8) & 1;
+    uint16_t src = dir ? cpu->de : cpu->hl, dst = dir ? cpu->hl : cpu->de;
+    uint8_t last = cpu->a;
+    for (uint32_t i = 0; i < n; i++) {            /* byte order matters when the ranges overlap */
+        last = cpu->mem[(uint16_t)(src + i)];
+        cpu->mem[(uint16_t)(dst + i)] = last;
+    }
+    cpu->hl = (uint16_t)(cpu->hl + n);
+    cpu->de = (uint16_t)(cpu->de + n);
+    cpu->a = last;
+    cpu->insn_count += 6ull * (n - 1);
+    loop_epilogue(cpu, cnt, n, spec, pc);
+    smc_sweep_forward(cpu, dst, n);
+}
+
+/* LD (HL),A; INC HL; DEC r; JP/JR NZ */
+void z80_jit_loop_fill(z80_cpu_t *cpu, uint32_t spec, uint16_t pc) {
+    uint8_t *cnt = counter_reg(cpu, spec & 7);
+    uint32_t n = *cnt ? *cnt : 256;
+    uint16_t dst = cpu->hl;
+    for (uint32_t i = 0; i < n; i++) cpu->mem[(uint16_t)(dst + i)] = cpu->a;
+    cpu->hl = (uint16_t)(cpu->hl + n);
+    cpu->insn_count += 4ull * (n - 1);
+    loop_epilogue(cpu, cnt, n, spec, pc);
+    smc_sweep_forward(cpu, dst, n);
+}

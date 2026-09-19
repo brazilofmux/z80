@@ -375,6 +375,8 @@ void dbt_print_stats(z80_dbt_t *dbt, FILE *out) {
             (unsigned long long)dbt->interp_fallback_insns,
             (double)dbt->interp_fallback_ns * 16.0 / 1e6,
             dbt->interp_fallback_insns ? (double)dbt->interp_fallback_ns * 16.0 / (double)dbt->interp_fallback_insns : 0.0);
+    fprintf(out, "  loops folded:           %llu (countdown/copy/fill, at translation)\n",
+            (unsigned long long)dbt->loops_folded);
     fprintf(out, "  SMC invalidations:      %llu\n",
             (unsigned long long)dbt->smc_invalidations);
     fprintf(out, "  links created/patched/unpatched: %llu / %llu / %llu\n",

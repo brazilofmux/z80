@@ -2036,6 +2036,70 @@ static int countdown_kind(const z80_decoded *decs, const uint16_t *pc_afters,
     return FUSE_NONE;
 }
 
+/* 8080-style copy / fill loops (WordStar, being 8080 code, cannot use
+ * LDIR and copies a byte at a time at six instructions each):
+ *   copy: LD A,(HL); LD (DE),A; INC HL; INC DE; DEC r; JP/JR NZ,start
+ *         (or LD A,(DE); LD (HL),A ...; the two INCs in either order)
+ *   fill: LD (HL),A; INC HL; DEC r; JP/JR NZ,start
+ * r is B/C (copy) or B/C/D/E (fill) — a counter the body does not
+ * otherwise touch. Returns the number of ops consumed (0 = no match)
+ * and the helper spec. */
+static int copyfill_kind(const z80_decoded *decs, const uint16_t *pc_afters,
+                         uint32_t i, uint32_t n_ops, uint32_t *spec, int *is_fill) {
+    uint16_t pc_i = (uint16_t)(pc_afters[i] - decs[i].bytes);
+    const z80_decoded *d = &decs[i];
+    for (uint32_t k = i; k < n_ops && k < i + 6; k++)
+        if (decs[k].prefix == 0xDD || decs[k].prefix == 0xFD) return 0;
+    int dir = -1, len = 0;
+    if (d->type == Z80_OP_LD_R_R && d->reg1 == 7 && d->reg2 == 6 &&
+        i + 5 < n_ops && decs[i + 1].type == Z80_OP_LD_DE_A) { dir = 0; len = 6; }
+    else if (d->type == Z80_OP_LD_A_DE && i + 5 < n_ops &&
+             decs[i + 1].type == Z80_OP_LD_R_R && decs[i + 1].reg1 == 6 && decs[i + 1].reg2 == 7) { dir = 1; len = 6; }
+    else if (d->type == Z80_OP_LD_R_R && d->reg1 == 6 && d->reg2 == 7 && i + 3 < n_ops) { len = 4; }
+    else return 0;
+    uint32_t j = i + (len == 6 ? 2 : 1);
+    if (len == 6) {
+        const z80_decoded *a = &decs[j], *b = &decs[j + 1];
+        int hl_de = a->type == Z80_OP_INC_RR && a->reg1 == 2 && b->type == Z80_OP_INC_RR && b->reg1 == 1;
+        int de_hl = a->type == Z80_OP_INC_RR && a->reg1 == 1 && b->type == Z80_OP_INC_RR && b->reg1 == 2;
+        if (!hl_de && !de_hl) return 0;
+        j += 2;
+    } else {
+        if (!(decs[j].type == Z80_OP_INC_RR && decs[j].reg1 == 2)) return 0;
+        j += 1;
+    }
+    const z80_decoded *dec = &decs[j];
+    if (dec->type != Z80_OP_DEC_R) return 0;
+    if (len == 6 ? (dec->reg1 > 1) : (dec->reg1 > 3)) return 0;
+    const z80_decoded *br = &decs[j + 1];
+    int cond = 0;
+    if (br->cc != 0) return 0;
+    if (br->type == Z80_OP_JP_CC_NN) { if (br->imm16 != pc_i) return 0; }
+    else if (br->type == Z80_OP_JR_CC_E) { if ((uint16_t)(pc_afters[j + 1] + (int16_t)br->disp) != pc_i) return 0; cond = 1; }
+    else return 0;
+    *spec = (uint32_t)dec->reg1 | ((uint32_t)(dir > 0) << 8) | ((uint32_t)cond << 9);
+    *is_fill = (len == 4);
+    return len;
+}
+
+static void emit_copyfill(emit_t *e, int is_fill, uint32_t spec, uint16_t loop_pc) {
+    emit_strh_imm(e, R_BC, R_CPU, OFF_BC);
+    emit_strh_imm(e, R_DE, R_CPU, OFF_DE);
+    emit_strh_imm(e, R_HL, R_CPU, OFF_HL);
+    emit_strb_imm(e, R_A,  R_CPU, OFF_A);
+    emit_strb_imm(e, R_F,  R_CPU, OFF_F);
+    emit_mov_x64_x64(e, A64_W0, R_CPU);
+    emit_movz_w32(e, A64_W1, (uint16_t)spec, 0);
+    emit_movz_w32(e, A64_W2, loop_pc, 0);
+    emit_mov_x64_imm64(e, A64_W9, (uint64_t)(uintptr_t)(is_fill ? z80_jit_loop_fill : z80_jit_loop_copy));
+    emit_blr(e, A64_W9);
+    emit_ldrh_imm(e, R_BC, R_CPU, OFF_BC);
+    emit_ldrh_imm(e, R_DE, R_CPU, OFF_DE);
+    emit_ldrh_imm(e, R_HL, R_CPU, OFF_HL);
+    emit_ldrb_imm(e, R_A,  R_CPU, OFF_A);
+    emit_ldrb_imm(e, R_F,  R_CPU, OFF_F);
+}
+
 static void emit_countdown(emit_t *e, int kind, int reg, uint16_t loop_pc) {
     /* W2 = r (canonical), W9 = iterations - 1 = (r - 1) & 0xFF */
     a64_reg_t v = emit_read_r8(e, A64_W2, reg, 0);
@@ -2172,8 +2236,24 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     for (uint32_t i = 0; i < n_ops; i++) {
         const z80_decoded *dec = &decs[i];
 
+        {
+            uint32_t spec; int is_fill;
+            int len = copyfill_kind(decs, pc_afters, i, n_ops, &spec, &is_fill);
+            if (len) {
+                dbt->loops_folded++;
+                if (cpm_debug) fprintf(stderr, "[fold] %s loop at %04X (counter %u)\n",
+                                       is_fill ? "fill" : "copy", (uint16_t)(pc_afters[i] - dec->bytes), spec & 7);
+                emit_copyfill(&e, is_fill, spec, (uint16_t)(pc_afters[i] - dec->bytes));
+                q_mode = Q_CLEAR;
+                prev_q = 0;
+                i += (uint32_t)len - 1;
+                continue;
+            }
+        }
         int fuse = countdown_kind(decs, pc_afters, i, n_ops);
         if (fuse != FUSE_NONE) {
+            dbt->loops_folded++;
+            if (cpm_debug) fprintf(stderr, "[fold] countdown loop at %04X\n", (uint16_t)(pc_afters[i] - dec->bytes));
             /* The DEC (or DJNZ) and its backward branch become one closed
              * form; the branch's not-taken path continues below. Neither
              * form leaves F written by its last instruction (a branch),

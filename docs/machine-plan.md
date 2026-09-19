@@ -332,10 +332,17 @@ instructions in one two-instruction loop: WordStar's timing tick, `DEC
 A; JP NZ` spun 256 times, 124 600 times per replace. Countdown loops
 (`DEC r; JP NZ/JR NZ,self`, `DJNZ $`) are now translated in closed form
 with the skipped instructions added to the count (tests/loop.com under
--i/-j/-V agrees to the instruction): **4.6 BIPS**. Next in the profile:
-the search-compare loop at 5771-57A1 (~10%) and 8080-style byte-copy
-loops (`LD A,(HL); LD (DE),A; INC HL; INC DE; DEC C; JP NZ`, ~3%) —
-the second is a generic idiom worth an intrinsic, like LDIR.
+-i/-j/-V agrees to the instruction): **4.6 BIPS**. The 8080-style
+byte-copy and fill loops (`LD A,(HL); LD (DE),A; INC HL; INC DE; DEC r;
+JP NZ` and `LD (HL),A; INC HL; DEC r; JP NZ`) are folded the same way
+through helpers with the LDIR-style SMC sweep — exact, but only ~4% of
+this workload. What remains is the filtered-copy search loop at
+5771-57A1 (~7.5%, early exits on control characters — app-specific)
+and a long diffuse tail: WordStar's display refresh, the DRI BDOS, line
+management. `Z80_PROFILE=1 -i` and `-d`'s `[fold]` lines are the tools.
+The whole replace session verifies under strict -V; zexdoc -V still
+passes. x86-64 needs the three translator additions (ports, countdown,
+copy/fill) mirrored.
 
 - WordStar 3.3 with the Kaypro terminal definition (or WS 4 installed
   for Kaypro), dBASE II 2.41, Turbo Pascal 3.0 (has a Kaypro install),

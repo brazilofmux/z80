@@ -75,6 +75,16 @@ void z80_jit_daa(z80_cpu_t *cpu);
 /* Port I/O from translated code: IN A,(n) / OUT (n),A call these
  * directly instead of trapping to the interpreter. They go through the
  * same cpu->port_in / port_out hooks the interpreter uses. */
+/* 8080-style copy and fill loops in closed form (see emit in the
+ * backends): spec bits 0-2 = counter register code (B/C/D/E), bit 8 =
+ * copy direction (0: (HL) -> (DE), 1: (DE) -> (HL)), bit 9 = memptr only
+ * if the loop ran at least twice (JR/DJNZ-style branch), pc = the loop's
+ * first instruction (the branch target). They update HL/DE/A/counter/F/
+ * memptr in the context, add the skipped instructions to insn_count,
+ * and run the SMC sweep over the bytes written. */
+void z80_jit_loop_copy(z80_cpu_t *cpu, uint32_t spec, uint16_t pc);
+void z80_jit_loop_fill(z80_cpu_t *cpu, uint32_t spec, uint16_t pc);
+
 uint8_t z80_jit_port_in(z80_cpu_t *cpu, uint8_t port, uint8_t high);
 void    z80_jit_port_out(z80_cpu_t *cpu, uint8_t port, uint8_t high, uint8_t val);
 
