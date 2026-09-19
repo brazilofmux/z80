@@ -10,6 +10,7 @@
 
 #include "cpm.h"
 #include "../kaypro/kaypro_video.h"
+#include "../kaypro/kaypro_render_tty.h"
 #include "../core/z80.h"
 #include <stdio.h>
 #include <unistd.h>
@@ -151,7 +152,13 @@ int cpm_bios_dispatch(z80_cpu_t *cpu) {
  * constat / read-console-buffer) and on warm boot. Flushing here per
  * character was ~6% of total runtime on console-chatty workloads. */
 void cpm_conout(uint8_t ch) {
-    if (kaypro_video_enabled) { kaypro_video_putc(ch); return; }
+    if (kaypro_video_enabled) {
+        kaypro_video_putc(ch);
+        /* Output bursts are painted at most ~60 times a second; the
+         * clock check is cheap next to the guest work per character. */
+        kaypro_render_tty_flush_if_due();
+        return;
+    }
     putchar(ch);
 }
 
@@ -159,6 +166,7 @@ void cpm_conout(uint8_t ch) {
  * With raw mode + VMIN=1 this works nicely. */
 uint8_t cpm_conin(void) {
     fflush(stdout);   /* pending prompt must be visible before we block */
+    kaypro_render_tty_flush(0);   /* same for the cell buffer: paint before blocking */
     /* Drain any pre-fetched characters first (makes polling + CONIN reliable) */
     if (queue_has_data()) {
         return queue_pop();
@@ -176,6 +184,7 @@ uint8_t cpm_conin(void) {
  * Returns 0xFF if ready, 0 if not. */
 uint8_t cpm_constat(void) {
     fflush(stdout);   /* a program polling for a key expects its prompt shown */
+    kaypro_render_tty_flush_if_due();
     /* First, anything already queued? */
     if (queue_has_data()) {
         return 0xFF;

@@ -41,4 +41,5 @@ disks/mscobol/
 
 # Host-side unit test binaries
 tests/video_test
+tests/render_test
 tests/*.dSYM/

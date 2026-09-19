@@ -29,7 +29,7 @@ endif
 # Core sources (will grow)
 CORE_SRCS = core/z80_decode.c core/z80_interp.c core/z80_state.c
 CPM_SRCS  = cpm/cpm_bdos.c cpm/cpm_bios.c cpm/cpm_loader.c cpm/cpm_disk.c cpm/cpm_ports.c
-KAYPRO_SRCS = kaypro/kaypro_video.c kaypro/kaypro_kbd.c
+KAYPRO_SRCS = kaypro/kaypro_video.c kaypro/kaypro_render_tty.c kaypro/kaypro_kbd.c
 
 # DBT sources
 DBT_COMMON_SRCS = dbt/dbt_common.c dbt/block_cache.c dbt/dbt_flags.c
@@ -67,7 +67,7 @@ clean:
 	rm -f tests/*.com tests/*.bin
 
 # Placeholder test target — will expand when we have .COM tests
-test: test-video
+test: test-video test-render
 	@echo "No guest tests yet — the monster is still in the larval stage."
 	@echo "Soon: ./$(TARGET) -i tests/hello.com && ./$(TARGET) -V tests/hello.com"
 
@@ -77,6 +77,13 @@ tests/video_test: tests/video_test.c kaypro/kaypro_video.c kaypro/kaypro_video.h
 	$(CC) $(CFLAGS) -o $@ tests/video_test.c kaypro/kaypro_video.c
 test-video: tests/video_test
 	./tests/video_test
+
+# Host-side test of the terminal renderer (escape stream captured in memory).
+.PHONY: test-render
+tests/render_test: tests/render_test.c kaypro/kaypro_render_tty.c kaypro/kaypro_video.c kaypro/kaypro_render_tty.h kaypro/kaypro_video.h
+	$(CC) $(CFLAGS) -o $@ tests/render_test.c kaypro/kaypro_render_tty.c kaypro/kaypro_video.c
+test-render: tests/render_test
+	./tests/render_test
 
 # Run the MS COBOL square-root benchmark (jit vs interp).
 # Override N=... for a different workload size.

@@ -2,6 +2,7 @@
 #include "cpm/cpm.h"
 #include "dbt/dbt.h"
 #include "kaypro/kaypro_video.h"
+#include "kaypro/kaypro_render_tty.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -36,8 +37,12 @@ static void host_event_dispatch(z80_cpu_t *cpu) {
                 (unsigned long long)cpu->insn_count);
         exit(130);
     }
-    /* SIGWINCH / SIGALRM: nothing to repaint until the Kaypro terminal
-     * lands (Phase 1). The plumbing is what matters here. */
+    if (pending & (1u << SIGWINCH)) {
+        /* The host screen may have been disturbed: repaint everything. */
+        kaypro_render_tty_invalidate();
+        kaypro_render_tty_flush(1);
+    }
+    /* SIGALRM: the HUD timer, once there is a HUD. */
 }
 
 static void install_signal_handlers(z80_cpu_t *cpu) {
@@ -241,6 +246,13 @@ int main(int argc, char **argv) {
     if (kaypro_term) {
         kaypro_video_init(KAYPRO_MODEL_84);
         kaypro_video_enabled = 1;
+        /* Paint on the host terminal only when there is one; a pipe
+         * (headless run) just gets --screen-dump. Registered after
+         * leave_raw_mode so it runs first on exit (atexit is LIFO). */
+        if (isatty(STDOUT_FILENO)) {
+            kaypro_render_tty_init();
+            atexit(kaypro_render_tty_shutdown);
+        }
     }
 
     if (use_jit && !dbt_jit_available()) {
@@ -310,6 +322,8 @@ int main(int argc, char **argv) {
             }
         }
     }
+
+    kaypro_render_tty_flush(0);
 
     if (kaypro_term && screen_dump) {
         FILE *sf = strcmp(screen_dump, "-") == 0 ? stdout : fopen(screen_dump, "w");
