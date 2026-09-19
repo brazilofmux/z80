@@ -289,7 +289,9 @@ void kaypro_video_dump(FILE *f, int with_attrs) {
         char line[KV_COLS + 1];
         for (int c = 0; c < KV_COLS; c++) {
             uint8_t ch = KV->cells[r][c].ch;
-            line[c] = (ch >= 0x20 && ch < 0x7F) ? (char)ch : '.';
+            /* '#' = Kaypro graphics block (bit 7), '.' = anything else
+             * unprintable (the model shouldn't store any). */
+            line[c] = (ch >= 0x20 && ch < 0x7F) ? (char)ch : (ch & 0x80) ? '#' : '.';
         }
         line[KV_COLS] = 0;
         fprintf(f, "%s\n", line);

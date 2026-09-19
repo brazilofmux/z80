@@ -91,7 +91,8 @@ static inline int  kaypro_video_row_dirty(int r) { return (kaypro_video.dirty_ro
 static inline void kaypro_video_clear_dirty(void) { kaypro_video.dirty_rows = 0; kaypro_video.cursor_moved = 0; }
 
 /* Text dump for tests and --screen-dump: 25 lines of 80 characters (the
- * last is the status line), non-printables shown as '.', trailing spaces
+ * last is the status line), graphics blocks shown as '#', other
+ * non-printables as '.', trailing spaces
  * kept (fixed width). With with_attrs, a second 25-line block follows
  * using one hex digit per cell for the attribute bits. */
 void kaypro_video_dump(FILE *f, int with_attrs);

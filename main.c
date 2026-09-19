@@ -3,6 +3,7 @@
 #include "dbt/dbt.h"
 #include "kaypro/kaypro_video.h"
 #include "kaypro/kaypro_render_tty.h"
+#include "kaypro/kaypro_kbd.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -103,6 +104,15 @@ static void leave_raw_mode(void) {
     term_raw = 0;
 }
 
+/* --screen-dump: written on the way out, whichever way out it is. */
+static const char *g_screen_dump = NULL;
+static void screen_dump_at_exit(void) {
+    FILE *sf = strcmp(g_screen_dump, "-") == 0 ? stdout : fopen(g_screen_dump, "w");
+    if (!sf) { perror(g_screen_dump); return; }
+    kaypro_video_dump(sf, 0);
+    if (sf != stdout) fclose(sf); else fflush(sf);
+}
+
 static void usage(const char *prog) {
     printf("Usage: %s [options] <program.com>\n\n", prog);
     printf("Options:\n");
@@ -114,6 +124,7 @@ static void usage(const char *prog) {
     printf("  -T       Trace block ops (periodic register dumps)\n");
     printf("  -K       Kaypro terminal: console output goes to the 80x24 cell buffer\n");
     printf("  --screen-dump FILE  With -K, write the screen text to FILE on exit\n");
+    printf("  --script FILE       Headless: keystrokes from FILE (implies -K); see kaypro/kaypro_kbd.h\n");
     printf("  -h       This help\n\n");
     printf("Example:\n");
     printf("  %s tests/hello.com\n\n", prog);
@@ -129,6 +140,7 @@ int main(int argc, char **argv) {
     const char *prog = NULL;
     int kaypro_term = 0;
     const char *screen_dump = NULL;
+    const char *script = NULL;
 
     /* New flexible argument handling for fast real-binary iteration:
      *   ./z80-monster
@@ -158,6 +170,9 @@ int main(int argc, char **argv) {
             kaypro_term = 1;
         } else if (strcmp(argv[i], "--screen-dump") == 0 && i + 1 < argc) {
             screen_dump = argv[++i];
+        } else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
+            script = argv[++i];
+            kaypro_term = 1;
         } else if (argv[i][0] != '-') {
             if (!disk_root && !prog) {
                 /* First non-option argument */
@@ -261,9 +276,15 @@ int main(int argc, char **argv) {
 
     enter_raw_mode();
     atexit(leave_raw_mode);
+    kaypro_kbd_init();
+    if (script && kaypro_kbd_script_load(script) != 0) return 1;
     if (kaypro_term) {
         kaypro_video_init(KAYPRO_MODEL_84);
         kaypro_video_enabled = 1;
+        if (screen_dump) {
+            g_screen_dump = screen_dump;
+            atexit(screen_dump_at_exit);
+        }
         /* Paint on the host terminal only when there is one; a pipe
          * (headless run) just gets --screen-dump. Registered after
          * leave_raw_mode so it runs first on exit (atexit is LIFO). */
@@ -344,16 +365,6 @@ int main(int argc, char **argv) {
     /* Off the alternate screen before the dump and the stats, so they
      * are actually visible when stdout is the terminal. */
     leave_kaypro_screen();
-
-    if (kaypro_term && screen_dump) {
-        FILE *sf = strcmp(screen_dump, "-") == 0 ? stdout : fopen(screen_dump, "w");
-        if (sf) {
-            kaypro_video_dump(sf, 0);
-            if (sf != stdout) fclose(sf);
-        } else {
-            perror(screen_dump);
-        }
-    }
 
     if (show_stats) {
         printf("\n--- stats ---\n");

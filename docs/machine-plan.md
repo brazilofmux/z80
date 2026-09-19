@@ -43,8 +43,11 @@ proves them wrong):
 - `-V` (lockstep verify) cannot run interactive programs: real and
   shadow CPUs both execute the console BDOS calls and consume keystrokes
   alternately (see the note in `dbt_run`).
-- Software on hand: zexdoc/zexall, MS-COBOL 4.65, Zork 1. No WordStar,
-  dBASE, CP/M system files, or Kaypro ROMs — see *Sourcing*.
+- Software on hand (all in `disks/`, git-ignored): zexdoc/zexall,
+  MS-COBOL 4.65, Zork 1, WordStar 3.00 (installed for a Visual 200 —
+  needs INSTALL for ADM-3A), dBASE II 2.41 (needs INSTALL), Turbo Pascal
+  3.00A (already installed "Kaypro with hilite"), MBASIC 5.2x, BBC
+  BASIC, M80/L80. No CP/M system files yet — see *Sourcing*.
 
 ## Phase 0 — core prerequisites
 
@@ -129,7 +132,9 @@ the Phase 2 BIOS both feed it.
 
 - Diff-based: keep a "last painted" copy; on each flush emit cursor
   moves and only the changed cells, coalescing runs and attribute
-  changes. Reverse/dim/blink/underline map to SGR 7/2/5/4.
+  changes. Reverse/dim/blink/underline map to SGR 7/2/5/4. **Done**
+  (`kaypro/kaypro_render_tty.c`, `make test-render`); graphics blocks
+  render as braille.
 - Flush policy: on every console trap the BDOS/BIOS layer calls
   `kaypro_video_flush_if_due()`, which paints if ≥ ~16 ms have passed
   or if the cursor moved and the output burst ended; plus on the
@@ -158,10 +163,13 @@ the Phase 2 BIOS both feed it.
 
 ### Headless mode and tests — the reason for the cell buffer
 
-- `--script <file>`: keystrokes with optional `~` delays and
-  `@wait-idle` (block until the guest has polled CONST with the queue
-  empty), like VCC's harness. `--screen-dump <file>` writes the 24×80
-  text (and optionally attributes) on exit or on a script command.
+- `--script <file>`: keystrokes with `~` / `@wait-idle` (block until
+  the guest has polled CONST N times with the queue empty, or blocked
+  in a read), `@dump`, `@sleep`, like VCC's harness; when the script
+  runs out and the guest asks again, the session ends.
+  `--screen-dump <file>` writes the 25×80 text on exit. **Done**
+  (`kaypro/kaypro_kbd.c`, which is now the single input path for CONST/
+  CONIN/HALT, host terminal or script, with the idle-poll sleep).
 - `tests/screen/`: small `.COM`s that draw with each escape, plus
   expected dumps. Later, WordStar smoke tests: open a file, type,
   search/replace, save, compare the dump and the saved file.

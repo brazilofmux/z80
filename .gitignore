@@ -32,9 +32,10 @@ tests/*.bin
 *.trace
 perf.data*
 callgrind.out.*
-# Commercial CP/M software stays local — bring your own copies.
-disks/zork1/
-disks/mscobol/
+# CP/M software stays local — bring your own copies. Only the freely
+# redistributable zexdoc/zexall exercisers are tracked.
+disks/*/
+!disks/zex/
 
 # mdfix -i backups
 *.bak

@@ -11,6 +11,7 @@
 #include "cpm.h"
 #include "../kaypro/kaypro_video.h"
 #include "../kaypro/kaypro_render_tty.h"
+#include "../kaypro/kaypro_kbd.h"
 #include "../core/z80.h"
 #include <stdio.h>
 #include <unistd.h>
@@ -19,32 +20,7 @@
 #include <errno.h>
 #include <sys/time.h>
 #include <string.h>
-
-/* Simple input queue to make CONST + CONIN / BDOS 6 (0xFF) polling reliable.
- * Prevents races where a character arrives between the poll and the read. */
-#define INPUT_QUEUE_SIZE 32
-static unsigned char input_queue[INPUT_QUEUE_SIZE];
-static int q_head = 0;
-static int q_tail = 0;
-
-static int queue_has_data(void) {
-    return q_head != q_tail;
-}
-
-static void queue_push(unsigned char ch) {
-    int next = (q_head + 1) % INPUT_QUEUE_SIZE;
-    if (next != q_tail) {           /* drop oldest if full (rare) */
-        input_queue[q_head] = ch;
-        q_head = next;
-    }
-}
-
-static unsigned char queue_pop(void) {
-    if (q_head == q_tail) return 0;
-    unsigned char ch = input_queue[q_tail];
-    q_tail = (q_tail + 1) % INPUT_QUEUE_SIZE;
-    return ch;
-}
+#include <stdlib.h>
 
 /* Forward decls for console helpers (we can share logic with BDOS later) */
 /* (BIOS wrappers removed — we now call the unified cpm_* functions directly) */
@@ -152,6 +128,7 @@ int cpm_bios_dispatch(z80_cpu_t *cpu) {
  * constat / read-console-buffer) and on warm boot. Flushing here per
  * character was ~6% of total runtime on console-chatty workloads. */
 void cpm_conout(uint8_t ch) {
+    kaypro_kbd_note_activity();
     if (kaypro_video_enabled) {
         kaypro_video_putc(ch);
         /* Output bursts are painted at most ~60 times a second; the
@@ -167,17 +144,15 @@ void cpm_conout(uint8_t ch) {
 uint8_t cpm_conin(void) {
     fflush(stdout);   /* pending prompt must be visible before we block */
     kaypro_render_tty_flush(0);   /* same for the cell buffer: paint before blocking */
-    /* Drain any pre-fetched characters first (makes polling + CONIN reliable) */
-    if (queue_has_data()) {
-        return queue_pop();
+    int ch = kaypro_kbd_read();
+    if (ch == KBD_END) {
+        /* The script is over and the guest wants more: the session ends
+         * here. exit() runs the atexit chain (screen dump, terminal
+         * restore) exactly as a normal exit would. */
+        fprintf(stderr, "[exit] script ended, guest waiting for input\n");
+        exit(0);
     }
-
-    unsigned char ch;
-    ssize_t n = read(STDIN_FILENO, &ch, 1);
-    if (n <= 0) {
-        return 0x1A;   /* CP/M EOF / ^Z */
-    }
-    return ch;
+    return (uint8_t)ch;
 }
 
 /* CONST — console status (non-blocking "is a key available?").
@@ -185,37 +160,7 @@ uint8_t cpm_conin(void) {
 uint8_t cpm_constat(void) {
     fflush(stdout);   /* a program polling for a key expects its prompt shown */
     kaypro_render_tty_flush_if_due();
-    /* First, anything already queued? */
-    if (queue_has_data()) {
-        return 0xFF;
-    }
-
-    fd_set rfds;
-    struct timeval tv = {0, 0};
-
-    FD_ZERO(&rfds);
-    FD_SET(STDIN_FILENO, &rfds);
-
-    int ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
-    if (ret > 0 && FD_ISSET(STDIN_FILENO, &rfds)) {
-        /* Pre-read the character into the queue so the next CONIN gets it
-         * without another syscall/race. */
-        unsigned char ch;
-        ssize_t n = read(STDIN_FILENO, &ch, 1);
-        if (n > 0) {
-            queue_push(ch);
-            return 0xFF;
-        }
-    }
-
-    /* Small host delay when no input is available.
-     * This prevents tight guest polling loops (very common in CP/M loaders
-     * and games) from spamming output like "Load Game Disk..." thousands
-     * of times per second. 1ms is usually enough to make it feel normal
-     * while still being very responsive. */
-    usleep(1000);   /* 1ms yield */
-
-    return 0;
+    return kaypro_kbd_poll() ? 0xFF : 0;
 }
 
 /* --- BIOS wrappers (these are what the BIOS dispatch calls) --- */
@@ -294,13 +239,6 @@ void cpm_read_console_buffer(z80_cpu_t *cpu, uint16_t de) {
 }
 
 void cpm_console_wait(void) {
-    if (queue_has_data()) return;
-    for (;;) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(STDIN_FILENO, &rfds);
-        int ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, NULL);
-        if (ret >= 0) return;          /* readable, or EOF (also readable) */
-        if (errno != EINTR) return;    /* give up rather than spin on an error */
-    }
+    kaypro_render_tty_flush(0);
+    kaypro_kbd_wait();
 }
