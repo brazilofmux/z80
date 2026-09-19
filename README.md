@@ -8,13 +8,15 @@ No good reason. Maximum vibes.
 
 ## Measured Performance
 
-All numbers from an M-series MacBook, single core:
+Single core, JIT unless noted:
 
-| Workload | Rate |
-|----------|------|
-| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** |
-| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** |
-| Same workloads, reference interpreter | ~230 MIPS |
+| Workload | M5 Max MacBook | Raspberry Pi 4 |
+|----------|----------------|----------------|
+| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** | **532 MIPS** |
+| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** | **0.47 BIPS** |
+| Same workloads, reference interpreter | ~230 MIPS | ~24 MIPS |
+
+The Pi 4 (Cortex-A72 @ 1.5 GHz, Debian 11, GCC 10, Linux/aarch64) built from a clean clone with no source changes; zexdoc and zexall pass 67/67 under the JIT, and the full zexdoc run passes under `-V` lockstep verification in six minutes. No Mac required.
 
 The JIT's interpreter-fallback rate on real workloads is ~0.02% — essentially everything runs as translated native code. Real software runs today: Zork 1, MS COBOL (the compiler *and* its output), and the zexdoc/zexall instruction exercisers pass 67/67 with correct CRCs.
 
@@ -73,7 +75,7 @@ Someone asked whether buying an Apple Silicon laptop and loading this gets you "
 
 1. **It doesn't boot CP/M.** There is no `A>` prompt and no CCP. You run one `.COM` from the host shell, and the BDOS/BIOS underneath it is a shim written in C that maps a host directory to drive A: and talks to your terminal. It's a program runner, not a machine. Booting real system images is on the list, after terminal emulation.
 2. **You can't experience 8,000× at a prompt anyway.** A prompt waits for a human at any speed. The speed shows in compute: MS-COBOL 4.65 compiles and links a program before the terminal finishes repainting. Anything that needs real terminal emulation — WordStar, dBASE — doesn't run yet, because the Kaypro screen/keyboard personality is a stub and there are no interrupts. Programs that only need BDOS console I/O (Zork) run fine.
-3. **Apple isn't required, but ARM64 is — for now.** The translator emits AArch64. The only macOS-specific bit is the W^X page-flipping dance Apple requires for JITs, and it's behind an `#ifdef` in `dbt/dbt.h`. FreeBSD/aarch64 or Linux/aarch64 should build and JIT; nobody has tried, and reports are welcome. On x86-64 there's no backend yet — and that's a *yet*: the authors' other DBTs (RISC-V, a custom ISA, and a 6809 whole-machine emulator) all have first-class AMD64 backends. This one was designed on AArch64's 31 GPRs first, and porting the register-pinning scheme to x86-64's smaller callee-saved set is a triage problem, not a research problem. Until then, x86-64 falls back to the reference interpreter at ~230 MIPS — still ~460× a 4 MHz Z80.
+3. **Apple isn't required, but ARM64 is — for now.** The translator emits AArch64. The only macOS-specific bit is the W^X page-flipping dance Apple requires for JITs, and it's behind an `#ifdef` in `dbt/dbt.h`. Linux/aarch64 is confirmed (Raspberry Pi 4, numbers above); FreeBSD/aarch64 should build and JIT but nobody has tried, and reports are welcome. On x86-64 there's no backend yet — and that's a *yet*: the authors' other DBTs (RISC-V, a custom ISA, and a 6809 whole-machine emulator) all have first-class AMD64 backends. This one was designed on AArch64's 31 GPRs first, and porting the register-pinning scheme to x86-64's smaller callee-saved set is a triage problem, not a research problem. Until then, x86-64 falls back to the reference interpreter at ~230 MIPS — still ~460× a 4 MHz Z80.
 4. **4.3 BIPS was measured on an M5 Max**, not a base-model chip. It's single-threaded, so the gap on a smaller M-series part won't be dramatic, but no number is quoted here that wasn't measured.
 5. **There is no good reason for any of this.** It's a dynamic binary translator research toy: the same techniques used on RISC-V and a custom ISA, pointed at the most irregular 8-bit ISA ever shipped in volume, to see how far static dead-flag elimination and self-modifying-code tracking can be pushed. The design document is the phrase "10 BIPS CP/M monster for no good reason."
 
