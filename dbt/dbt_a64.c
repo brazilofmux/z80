@@ -445,6 +445,15 @@ static void emit_tail_prologue(emit_t *e, uint32_t insn_count_delta, int q_mode)
  * way to localise a divergence to one block. */
 static int s_strict_exit = -1;
 
+/* IN A,(n) / OUT (n),A are translated as direct helper calls — the BIOS
+ * of a native CP/M system talks to the host through them constantly
+ * (WordStar: ~1 M console polls per 50-page search-and-replace, a
+ * quarter of the run as interpreter traps). Off under -V: the shadow
+ * would then perform the I/O a second time, and the fallback-step
+ * re-sync is what keeps lockstep exact. Z80_NO_INLINE_PORTS=1 turns it
+ * off for A/B measurement. */
+static int s_inline_ports = -1;
+
 static void emit_dynamic_tail(emit_t *e, uint32_t exit_stub_off) {
     if (s_strict_exit > 0) {
         emit_b(e, (int32_t)exit_stub_off - (int32_t)emit_pos(e));
@@ -948,6 +957,10 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_LDIR:
     case Z80_OP_LDDR:
         return 1;
+
+    case Z80_OP_IN_A_N:
+    case Z80_OP_OUT_N_A:
+        return !idx && s_inline_ports > 0;
 
     /* PUSH/POP rr. reg1 encoding:
      *   0/1/2  → BC/DE/HL
@@ -1569,6 +1582,44 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
         return OP_FALL_THROUGH;
     }
 
+    case Z80_OP_OUT_N_A:
+    case Z80_OP_IN_A_N: {
+        /* Direct helper call (see s_inline_ports). Flush the pending
+         * instruction count first: a helper may end the run (CONIN at
+         * the end of a script, the exit port) and the stats read
+         * cpu->insn_count. The pinned guest state lives in callee-saved
+         * registers, so nothing else needs saving.
+         *   OUT (n),A : port_out(cpu, n, A, A); memptr = (A<<8)|((n+1)&FF)
+         *   IN  A,(n) : memptr = ((A<<8)|n)+1 with the OLD A; A = port_in(cpu, n, A) */
+        emit_ldr_x64_imm(e, A64_W9, R_CPU, OFF_INSN_COUNT);
+        emit_add_x64(e, A64_W9, A64_W9, R_CNT);
+        emit_str_x64_imm(e, A64_W9, R_CPU, OFF_INSN_COUNT);
+        emit_movz_x64(e, R_CNT, 0, 0);
+        if (dec->type == Z80_OP_OUT_N_A) {
+            if (store_memptr) emit_set_memptr_quirk_imm(e, (uint8_t)((dec->imm8 + 1) & 0xFF));
+            emit_mov_x64_x64(e, A64_W0, R_CPU);
+            emit_movz_w32(e, A64_W1, dec->imm8, 0);
+            emit_mov_w32_w32(e, A64_W2, R_A);
+            emit_mov_w32_w32(e, A64_W3, R_A);
+            emit_mov_x64_imm64(e, A64_W9, (uint64_t)(uintptr_t)z80_jit_port_out);
+            emit_blr(e, A64_W9);
+        } else {
+            if (store_memptr) {
+                /* memptr = (A << 8 | n) + 1, before A changes */
+                emit_lsl_w32_imm(e, A64_W9, R_A, 8);
+                emit_add_w32_imm(e, A64_W9, A64_W9, (uint16_t)(dec->imm8 + 1));
+                emit_strh_imm(e, A64_W9, R_CPU, OFF_MEMPTR);
+            }
+            emit_mov_x64_x64(e, A64_W0, R_CPU);
+            emit_movz_w32(e, A64_W1, dec->imm8, 0);
+            emit_mov_w32_w32(e, A64_W2, R_A);
+            emit_mov_x64_imm64(e, A64_W9, (uint64_t)(uintptr_t)z80_jit_port_in);
+            emit_blr(e, A64_W9);
+            emit_and_w32_imm(e, R_A, A64_W0, 0xFF);
+        }
+        return OP_FALL_THROUGH;
+    }
+
     case Z80_OP_LDIR:
     case Z80_OP_LDDR: {
         /* Helper does the entire block copy, updates HL/DE/BC/F, and
@@ -1736,6 +1787,8 @@ enum {
 };
 static int op_memptr_effect(const z80_decoded *dec) {
     switch (dec->type) {
+    case Z80_OP_IN_A_N: case Z80_OP_OUT_N_A:
+        return MPTR_WRITE;
     case Z80_OP_LD_A_BC: case Z80_OP_LD_A_DE:
     case Z80_OP_LD_BC_A: case Z80_OP_LD_DE_A:
     case Z80_OP_LD_A_NN: case Z80_OP_LD_NN_A:
@@ -1951,6 +2004,8 @@ static void emit_branch_ender(z80_dbt_t *dbt, emit_t *e,
 uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     if (s_strict_exit < 0)
         s_strict_exit = dbt->verify && getenv("Z80_VERIFY_STRICT") != NULL;
+    if (s_inline_ports < 0)
+        s_inline_ports = !dbt->verify && getenv("Z80_NO_INLINE_PORTS") == NULL;
     if (dbt->code_used + 32768 > CODE_BUF_SIZE) {
         /* Out of JIT space — blow away the cache and reset the cursor.
          * Cheap-and-cheerful; chained blocks would need patch-back here.

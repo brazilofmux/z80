@@ -245,8 +245,25 @@ static void io_block(z80_cpu_t *cpu, int type) {
     cpu->q = 1;
 }
 
+uint32_t *z80_profile_counts = NULL;
+
+void z80_profile_report(FILE *out, int top) {
+    if (!z80_profile_counts) return;
+    uint64_t total = 0;
+    for (int i = 0; i < 65536; i++) total += z80_profile_counts[i];
+    fprintf(out, "--- profile: %llu instructions, top %d PCs ---\n", (unsigned long long)total, top);
+    for (int k = 0; k < top; k++) {
+        uint32_t best = 0; int pc = -1;
+        for (int i = 0; i < 65536; i++) if (z80_profile_counts[i] > best) { best = z80_profile_counts[i]; pc = i; }
+        if (pc < 0 || best == 0) break;
+        fprintf(out, "  %04X  %10u  %5.2f%%\n", pc, best, total ? 100.0 * best / (double)total : 0.0);
+        z80_profile_counts[pc] = 0;
+    }
+}
+
 int z80_step(z80_cpu_t *cpu) {
     z80_decoded dec;
+    if (z80_profile_counts) z80_profile_counts[cpu->pc]++;
     int n = z80_decode_one(cpu->mem, cpu->pc, &dec);
     if (n == 0) {
         fprintf(stderr, "z80_step: decode failed at %04X\n", cpu->pc);

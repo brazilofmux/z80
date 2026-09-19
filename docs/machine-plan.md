@@ -317,6 +317,18 @@ whole boot+compile+link in lockstep.
 
 ## Phase 3 — applications and the 10 BIPS road
 
+**Baseline (2026-09-18, late).** `bench/wsreplace.sh` is the README's
+target workload made repeatable: WordStar 3.00 opens a 50-page document
+on a hard-disk image under the native CCP/BDOS, replaces every "kaypro"
+with "monster" (818 of them), saves, exits. 293 M instructions.
+First measurement 2.84 BIPS with a quarter of the wall clock in ~905 K
+console port traps; with `IN A,(n)` / `OUT (n),A` translated as direct
+helper calls (AArch64; off under `-V` so the shadow re-sync stays
+exact; `Z80_NO_INLINE_PORTS=1` for A/B) there are no fallbacks at all
+and it runs at **3.17 BIPS**. Native SQUARO is within a few percent of
+the shim's 4.3. The gap to 10 is now entirely in translated code, which
+is where the per-application work was always going to be.
+
 - WordStar 3.3 with the Kaypro terminal definition (or WS 4 installed
   for Kaypro), dBASE II 2.41, Turbo Pascal 3.0 (has a Kaypro install),
   MBASIC 5.21, and whatever else people bring. Each gets a scripted

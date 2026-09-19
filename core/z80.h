@@ -11,6 +11,7 @@
 #define Z80_H
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stddef.h>
 
 /* ============================================================================
@@ -357,5 +358,12 @@ void z80_mem_w(z80_cpu_t *cpu, uint16_t addr, uint8_t val);
  * Overlay loaders reuse code addresses, and a translated block for the
  * old code must not survive the new bytes landing under it. */
 void z80_mem_host_wrote(z80_cpu_t *cpu, uint16_t addr, uint32_t len);
+
+/* Z80_PROFILE=1 (interpreter only): count executed instructions per guest
+ * PC; z80_profile_report prints the hottest addresses. The cheap way to
+ * find the loops an application lives in before deciding what the
+ * translator should special-case. */
+extern uint32_t *z80_profile_counts;   /* 65536 entries when enabled, else NULL */
+void z80_profile_report(FILE *out, int top);
 
 #endif /* Z80_H */

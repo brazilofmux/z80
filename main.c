@@ -170,6 +170,7 @@ static void print_stats_at_exit(void) {
     if (secs > 0) printf("Rate:         %.3f BIPS\n", (double)g_stats_cpu->insn_count / secs / 1e9);
     printf("Console polls: %llu (longest quiet run %u)\n",
            (unsigned long long)kaypro_kbd_polls(), kaypro_kbd_max_quiet_streak());
+    z80_profile_report(stdout, 40);
     if (g_stats_used_jit && g_stats_dbt) {
         printf("JIT:\n");
         dbt_print_stats(g_stats_dbt, stdout);
@@ -382,6 +383,10 @@ int main(int argc, char **argv) {
     enter_raw_mode();
     atexit(leave_raw_mode);
     kaypro_kbd_attach(&cpu);
+    if (getenv("Z80_PROFILE")) {
+        z80_profile_counts = calloc(65536, sizeof *z80_profile_counts);
+        if (use_jit) fprintf(stderr, "Z80_PROFILE counts interpreter steps only; use -i for the whole run\n");
+    }
     if (kaypro_term) {
         kaypro_video_init(KAYPRO_MODEL_84);
         kaypro_video_enabled = 1;

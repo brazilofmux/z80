@@ -416,3 +416,10 @@ void z80_jit_post_store(z80_cpu_t *cpu, uint16_t addr) {
      * point of this entry point is to share the invalidation. */
     z80_mem_w(cpu, addr, cpu->mem[addr & 0xFFFF]);
 }
+
+uint8_t z80_jit_port_in(z80_cpu_t *cpu, uint8_t port, uint8_t high) {
+    return cpu->port_in ? cpu->port_in(cpu, port, high) : 0xFF;
+}
+void z80_jit_port_out(z80_cpu_t *cpu, uint8_t port, uint8_t high, uint8_t val) {
+    if (cpu->port_out) cpu->port_out(cpu, port, high, val);
+}

@@ -202,38 +202,46 @@ static int stdin_readable(long wait_us) {
     return ret > 0 && FD_ISSET(STDIN_FILENO, &rfds);
 }
 
-/* Move one host key into the queue: a byte, or an ESC-led sequence
- * gathered while more bytes follow within a few milliseconds (a lone
- * ESC pressed by hand arrives alone). Returns 1 if something was
- * queued, 0 if nothing was available or the key is unmapped, -1 on
- * EOF. */
+/* Fill the queue from the host: read every byte that is ready (one
+ * syscall per burst, not per byte — a pasted line or a piped input file
+ * arrives in one read) and translate keys. An ESC that ends the chunk
+ * waits a few milliseconds for the rest of its sequence; a lone ESC
+ * pressed by hand arrives alone. Returns 1 if something was queued, 0
+ * if nothing was available or every key was unmapped, -1 on EOF. */
 static int host_fetch(int block) {
     if (!stdin_readable(block ? -1 : 0)) return 0;
-    uint8_t seq[16];
-    ssize_t n = read(STDIN_FILENO, seq, 1);
+    uint8_t buf[256];
+    ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
     if (n <= 0) return -1;               /* EOF or error */
-    if (seq[0] == 0x1D) {
-        /* ^] leaves the emulator, the way it leaves telnet: a native CP/M
-         * session has no other way out (the CCP never exits), and the
-         * atexit chain restores the terminal. */
-        fprintf(stderr, "\n[exit] ^] pressed\n");
-        exit(0);
-    }
-    size_t len = 1;
-    if (seq[0] == 0x1B) {
-        /* Terminals deliver a sequence in one burst; 20 ms is generous. */
-        while (len < sizeof seq && stdin_readable(len == 1 ? 20000 : 2000)) {
-            if (read(STDIN_FILENO, seq + len, 1) <= 0) break;
+    size_t len = (size_t)n;
+    /* A sequence may have been cut by the read boundary: a trailing ESC,
+     * ESC [ or ESC O gets a few milliseconds for the rest to arrive. */
+    if (len < sizeof buf &&
+        (buf[len - 1] == 0x1B ||
+         (len >= 2 && buf[len - 2] == 0x1B && (buf[len - 1] == '[' || buf[len - 1] == 'O')))) {
+        while (len < sizeof buf && stdin_readable(20000)) {
+            if (read(STDIN_FILENO, buf + len, 1) <= 0) break;
             len++;
-            uint8_t c = seq[len - 1];
-            if (len == 2 && c != '[' && c != 'O') break;            /* ESC x: not a sequence */
-            if (len >= 3 && (seq[1] == 'O' || (c >= 0x40 && c <= 0x7E))) break;   /* final byte */
+            uint8_t c = buf[len - 1];
+            if (c >= 0x40 && c <= 0x7E && c != '[') break;
         }
     }
-    uint8_t out[8];
-    size_t k = kaypro_kbd_translate(seq, len, out, sizeof out);
-    for (size_t i = 0; i < k; i++) q_push(out[i]);
-    return k ? 1 : 0;
+    int queued = 0;
+    for (size_t i = 0; i < len; ) {
+        size_t seqlen = 1;
+        if (buf[i] == 0x1B && i + 1 < len && (buf[i + 1] == '[' || buf[i + 1] == 'O')) {
+            /* CSI: parameters then a final byte 0x40..0x7E; SS3: one byte. */
+            seqlen = 2;
+            if (buf[i + 1] == 'O') { if (i + 2 < len) seqlen = 3; }
+            else while (i + seqlen < len) { uint8_t c = buf[i + seqlen++]; if (c >= 0x40 && c <= 0x7E) break; }
+        }
+        uint8_t out[8];
+        size_t k = kaypro_kbd_translate(buf + i, seqlen, out, sizeof out);
+        for (size_t j = 0; j < k; j++) q_push(out[j]);
+        if (k) queued = 1;
+        i += seqlen;
+    }
+    return queued ? 1 : 0;
 }
 
 /* ---- script source ---------------------------------------------------- */

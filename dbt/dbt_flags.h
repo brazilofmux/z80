@@ -72,6 +72,12 @@ uint8_t z80_jit_dec8(z80_cpu_t *cpu, uint8_t v);
  * core/z80_interp.c. */
 void z80_jit_daa(z80_cpu_t *cpu);
 
+/* Port I/O from translated code: IN A,(n) / OUT (n),A call these
+ * directly instead of trapping to the interpreter. They go through the
+ * same cpu->port_in / port_out hooks the interpreter uses. */
+uint8_t z80_jit_port_in(z80_cpu_t *cpu, uint8_t port, uint8_t high);
+void    z80_jit_port_out(z80_cpu_t *cpu, uint8_t port, uint8_t high, uint8_t val);
+
 /* CB-prefix rotate/shift family. Take val, return new val, set
  * C/S/Z/PV/X/Y from result (or shifted-out bit for C); H=0, N=0.
  * Mirrors the CB body of core/z80_interp.c. */
