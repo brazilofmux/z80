@@ -13,9 +13,10 @@ proves them wrong):
   as guest code, on a BIOS we write in Z80 assembly that reaches the host
   through a few `OUT`/`IN` ports. Not a bigger C shim, not full Kaypro
   hardware emulation.
-- **The terminal is a cell buffer** — 80×24 attributed cells fed by a
-  Kaypro escape interpreter and rendered to the host terminal by a
-  minimal-redraw ANSI renderer, with line 25 as the HUD. Not a stream
+- **The terminal is a cell buffer** — 80×25 attributed cells (24 text
+  rows plus the Kaypro 10's status line) fed by a Kaypro escape
+  interpreter and rendered to the host terminal by a minimal-redraw ANSI
+  renderer, with host line 26 as the HUD. Not a stream
   translator. An SDL window is a second renderer on the same buffer,
   later, if wanted.
 - **The existing shim stays** as `-shim` (the default until Phase 2 lands):
@@ -92,21 +93,30 @@ the Phase 2 BIOS both feed it.
 
 ### kaypro_video.c — the cell buffer and escape interpreter
 
-- `struct kaypro_cell { uint8_t ch, attr; }`, 24 rows × 80 cols, cursor,
-  attribute state, scroll region (whole screen). A dirty-row bitmap for
-  the renderer.
+- `struct kaypro_cell { uint8_t ch, attr; }`, 25 rows × 80 cols (row 24
+  is the status line, kept out of scrolling while ESC B 7 "status line
+  preservation" is on — the default), cursor, attribute state. A
+  dirty-row bitmap for the renderer. **Done**, with a host unit test
+  (`make test-video`).
 - Escape interpreter for the Kaypro '84 set (2X/4'84/10), which is
-  ADM-3A plus extensions. First cut, verify each against the Kaypro 10
-  user guide's terminal table before relying on it:
+  ADM-3A plus extensions. Verified against the Kaypro 10 User's Guide
+  (pp. 64-69 and 77-78/86-87 of the guide); the table below is what it
+  says, with the one discrepancy noted:
   - Controls: `^G` bell, `^H` left, `^J` down/scroll, `^K` up, `^L`
     right, `^M` CR, `^Z` clear screen + home, `^^` (0x1E) home,
     `^W` erase to end of screen, `^X` erase to end of line.
   - `ESC = row col` cursor address (each +0x20), the one every
     application uses.
-  - `ESC B n` / `ESC C n` attribute on/off: 0 reverse, 1 reduced
-    intensity, 2 blink, 3 underline, 4 cursor on/off, 5 cursor blink,
-    6 status-line mode, 7 keyboard click (ignore).
-  - `ESC R` delete line, `ESC E` insert line.
+  - `ESC B n` / `ESC C n` attribute on/off: 0 inverse, 1 reduced
+    intensity, 2 blink, 3 underline, 4 cursor on/off, 5 "video mode",
+    6 remember cursor (B) / return to it (C), 7 status-line
+    preservation on/off.
+  - `ESC R` delete line, `ESC E` insert line (guide p. 87, the Sept 1984
+    Addendum p. 28, and termcap; guide p. 77 prints them the other way
+    round).
+  - `ESC A` displays a lower-case alphabet (factory test; no-op here).
+  - NUL prints as an accent grave (p. 87). Bytes ≥ 0x80 are 2×4 pixel
+    graphics characters (p. 67); stored as-is, rendered later.
   - `ESC * r c` / `ESC space r c` pixel on/off, `ESC L` / `ESC D` line
     draw/erase — the 160×100 "bit graphics". Accept and ignore in the
     first cut; a graphics plane can be added under the text later.
@@ -125,7 +135,7 @@ the Phase 2 BIOS both feed it.
   or if the cursor moved and the output burst ended; plus on the
   host-event flag. Bursts from a 4 BIPS program must not become 4 BIPS
   of terminal writes.
-- Line 25 is the HUD: current BIPS (from `insn_count` deltas over the
+- Host line 26 is the HUD (the Kaypro's own line 25 is its status line): current BIPS (from `insn_count` deltas over the
   flush interval), blocks translated, fallback rate, drive activity.
   `-H` toggles it; it is off when stdout is not a tty.
 - Host terminal setup: raw mode is already there; add alternate screen
@@ -187,19 +197,31 @@ dump; Zork plays in the cell-buffer terminal with the HUD live;
 
 ### Port map (proposal; the BIOS and `cpm_host.c` are the two users)
 
+The real Kaypro's ports are documented in the 1984 Addendum pp. 24-27
+(keyboard SIO 0x05/0x07, serial 0x00-0x0F, FDC 1793 at 0x10-0x13,
+system latch 0x14-0x17, printer 0x18-0x1B, 6545 CRTC 0x1C/0x1D, RTC
+0x20-0x24, hard disk WD1002 at 0x80-0x87). Kaypro utilities (CONFIG,
+MFDISK, the "video mode" graphics) poke some of those directly, so our
+host ports stay clear of them, up in 0xE0-0xEF where no Kaypro model
+had anything:
+
 | Port | Dir | Meaning |
 |------|-----|---------|
-| 0x00 | IN  | CONST → 0/FF |
-| 0x01 | IN/OUT | CONIN / CONOUT |
-| 0x02 | OUT | LIST (goes to a host file or `/dev/null`) |
-| 0x03 | IN/OUT | READER / PUNCH (host files, optional) |
-| 0x10 | OUT | select drive (A) |
-| 0x11 | OUT | track low, 0x12 track high |
-| 0x13 | OUT | sector low, 0x14 sector high |
-| 0x15 | OUT | DMA low, 0x16 DMA high |
-| 0x17 | OUT | 0 = read, 1 = write; result read back on 0x17 |
-| 0x20 | IN  | host time (successive reads yield a BCD timestamp, for CP/M 3 later) |
-| 0xF0 | OUT | debug/trace byte, `-d` only |
+| 0xE0 | IN  | CONST → 0/FF |
+| 0xE1 | IN/OUT | CONIN / CONOUT |
+| 0xE2 | OUT | LIST (goes to a host file or `/dev/null`) |
+| 0xE3 | IN/OUT | READER / PUNCH (host files, optional) |
+| 0xE8 | OUT | select drive (A) |
+| 0xE9 | OUT | track low, 0xEA track high |
+| 0xEB | OUT | sector low, 0xEC sector high |
+| 0xED | OUT | DMA low, 0xEE DMA high |
+| 0xEF | OUT | 0 = read, 1 = write; result read back on 0xEF |
+| 0xE4 | IN  | host time (successive reads yield a BCD timestamp, for CP/M 3 later) |
+| 0xE7 | OUT | debug/trace byte, `-d` only |
+
+Real Kaypro ports that software touches anyway get a stub in
+`cpm_host.c` that logs under `-d` and returns 0xFF / drops the write,
+which is what the interpreter does today for everything.
 
 Blocked `CONIN`, when the queue is empty, blocks the host thread — no
 guest spinning at all.
@@ -251,8 +273,13 @@ whole boot+compile+link in lockstep.
 
 - **CP/M 2.2 CCP/BDOS source and binaries**: Digital Research's, via
   the successor rights holder's 2022 statement permitting unrestricted
-  use; The Unofficial CP/M Web Site hosts the archive. We keep only the
-  CCP and BDOS sources (and our assembled output); the BIOS is ours.
+  use. Start from https://github.com/brouhaha/cpm22 (the DRI sources
+  cleaned up to assemble with modern tools); The Unofficial CP/M Web
+  Site has the original archive. We keep only the CCP and BDOS sources
+  (and our assembled output); the BIOS is ours.
+- **Kaypro 10 User's Guide + September 1984 Addendum**: in hand
+  (~/Downloads). The Addendum's p. 28 video protocol and pp. 24-27 port
+  map are the references the terminal and the port plan cite.
 - **WordStar 3.3 / 4 for CP/M, dBASE II, Turbo Pascal 3**: still
   commercial in the strict sense; bring your own copies, as with
   MS-COBOL and Zork today. The same archive and the Internet Archive

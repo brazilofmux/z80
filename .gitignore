@@ -38,3 +38,7 @@ disks/mscobol/
 
 # mdfix -i backups
 *.bak
+
+# Host-side unit test binaries
+tests/video_test
+tests/*.dSYM/

@@ -9,6 +9,7 @@
  */
 
 #include "cpm.h"
+#include "../kaypro/kaypro_video.h"
 #include "../core/z80.h"
 #include <stdio.h>
 #include <unistd.h>
@@ -150,6 +151,7 @@ int cpm_bios_dispatch(z80_cpu_t *cpu) {
  * constat / read-console-buffer) and on warm boot. Flushing here per
  * character was ~6% of total runtime on console-chatty workloads. */
 void cpm_conout(uint8_t ch) {
+    if (kaypro_video_enabled) { kaypro_video_putc(ch); return; }
     putchar(ch);
 }
 

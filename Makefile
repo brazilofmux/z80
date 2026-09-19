@@ -67,9 +67,16 @@ clean:
 	rm -f tests/*.com tests/*.bin
 
 # Placeholder test target — will expand when we have .COM tests
-test:
-	@echo "No tests yet — the monster is still in the larval stage."
+test: test-video
+	@echo "No guest tests yet — the monster is still in the larval stage."
 	@echo "Soon: ./$(TARGET) -i tests/hello.com && ./$(TARGET) -V tests/hello.com"
+
+# Host-side unit test of the Kaypro screen model (no Z80 involved).
+.PHONY: test-video
+tests/video_test: tests/video_test.c kaypro/kaypro_video.c kaypro/kaypro_video.h
+	$(CC) $(CFLAGS) -o $@ tests/video_test.c kaypro/kaypro_video.c
+test-video: tests/video_test
+	./tests/video_test
 
 # Run the MS COBOL square-root benchmark (jit vs interp).
 # Override N=... for a different workload size.

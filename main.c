@@ -1,6 +1,7 @@
 #include "core/z80.h"
 #include "cpm/cpm.h"
 #include "dbt/dbt.h"
+#include "kaypro/kaypro_video.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -88,6 +89,8 @@ static void usage(const char *prog) {
     printf("  -s       Show stats on exit\n");
     printf("  -d       Print BDOS/BIOS/disk startup tracing\n");
     printf("  -T       Trace block ops (periodic register dumps)\n");
+    printf("  -K       Kaypro terminal: console output goes to the 80x24 cell buffer\n");
+    printf("  --screen-dump FILE  With -K, write the screen text to FILE on exit\n");
     printf("  -h       This help\n\n");
     printf("Example:\n");
     printf("  %s tests/hello.com\n\n", prog);
@@ -101,6 +104,8 @@ int main(int argc, char **argv) {
     int verify = 0;
     const char *disk_root = NULL;
     const char *prog = NULL;
+    int kaypro_term = 0;
+    const char *screen_dump = NULL;
 
     /* New flexible argument handling for fast real-binary iteration:
      *   ./z80-monster
@@ -126,6 +131,10 @@ int main(int argc, char **argv) {
             cpm_debug = 1;
         } else if (strcmp(argv[i], "-T") == 0) {
             trace_block_ops = 1;
+        } else if (strcmp(argv[i], "-K") == 0) {
+            kaypro_term = 1;
+        } else if (strcmp(argv[i], "--screen-dump") == 0 && i + 1 < argc) {
+            screen_dump = argv[++i];
         } else if (argv[i][0] != '-') {
             if (!disk_root && !prog) {
                 /* First non-option argument */
@@ -229,6 +238,10 @@ int main(int argc, char **argv) {
 
     enter_raw_mode();
     atexit(leave_raw_mode);
+    if (kaypro_term) {
+        kaypro_video_init(KAYPRO_MODEL_84);
+        kaypro_video_enabled = 1;
+    }
 
     if (use_jit && !dbt_jit_available()) {
         fprintf(stderr, "[dbt] JIT not available on this host — falling back to interp\n");
@@ -295,6 +308,16 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Safety limit (50B insns) reached — bug or wait?\n");
                 break;
             }
+        }
+    }
+
+    if (kaypro_term && screen_dump) {
+        FILE *sf = strcmp(screen_dump, "-") == 0 ? stdout : fopen(screen_dump, "w");
+        if (sf) {
+            kaypro_video_dump(sf, 0);
+            if (sf != stdout) fclose(sf);
+        } else {
+            perror(screen_dump);
         }
     }
 
