@@ -265,6 +265,6 @@ int main(int argc, char **argv) {
         dbt_cleanup(dbt);
         free(dbt);
     }
-    free(cpu.mem);
+    z80_mem_free(cpu.mem);
     return 0;
 }

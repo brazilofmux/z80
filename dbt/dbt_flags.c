@@ -26,9 +26,47 @@ static inline uint8_t parity8(uint8_t v) {
  * byte lives here, so inline-emitted ALU code gets S/Z/XY (+parity, or
  * +H/PV for INC/DEC) with a single LDRB instead of a helper call.
  * Layout (dbt_flags.h): LOGIC +0, SZXY +256, INC +512, DEC +768. */
-uint8_t z80_f_tables[1024];
+uint8_t  z80_f_tables[1024];
+uint16_t z80_daa_table[DAA_TABLE_LEN];
+
+/* One DAA step on (a, f) — the shared reference used by both the helper
+ * and the table builder. Mirrors the Z80_OP_DAA case in core/z80_interp.c. */
+static void daa_compute(uint8_t a, uint8_t fin, uint8_t *a_out, uint8_t *f_out) {
+    uint8_t fcin = fin & Z80_FLAG_C;
+    uint8_t fhin = fin & Z80_FLAG_H;
+    uint8_t fnin = fin & Z80_FLAG_N;
+    uint8_t corr = 0;
+    uint8_t new_c = 0;
+
+    if ((a & 0x0F) > 9 || fhin) corr |= 0x06;
+    if (a > 0x99 || fcin)       { corr |= 0x60; new_c = Z80_FLAG_C; }
+
+    uint8_t new_a;
+    uint8_t new_h;
+    if (fnin) {
+        new_a = a - corr;
+        new_h = (fhin && (a & 0x0F) < 6) ? Z80_FLAG_H : 0;
+    } else {
+        new_a = a + corr;
+        new_h = ((a & 0x0F) > 9) ? Z80_FLAG_H : 0;
+    }
+
+    uint8_t f = fnin | new_c | new_h | xy_from(new_a);
+    if (new_a == 0) f |= Z80_FLAG_Z;
+    if (new_a & 0x80) f |= Z80_FLAG_S;
+    f |= parity8(new_a);
+    *a_out = new_a;
+    *f_out = f;
+}
 
 void z80_flag_tables_init(void) {
+    for (int i = 0; i < DAA_TABLE_LEN; i++) {
+        uint8_t a = (uint8_t)i;
+        uint8_t f = (uint8_t)((i >> 8) & (Z80_FLAG_C | Z80_FLAG_N | Z80_FLAG_H));
+        uint8_t na, nf;
+        daa_compute(a, f, &na, &nf);
+        z80_daa_table[i] = (uint16_t)(((uint16_t)nf << 8) | na);
+    }
     for (int r = 0; r < 256; r++) {
         uint8_t szxy = xy_from((uint8_t)r);
         if (r == 0)     szxy |= Z80_FLAG_Z;
@@ -151,32 +189,7 @@ void z80_jit_cp(z80_cpu_t *cpu, uint8_t b) {
 
 /* DAA — byte-for-byte mirror of the interp's Z80_OP_DAA case. */
 void z80_jit_daa(z80_cpu_t *cpu) {
-    uint8_t a = cpu->a;
-    uint8_t fcin = cpu->f & Z80_FLAG_C;
-    uint8_t fhin = cpu->f & Z80_FLAG_H;
-    uint8_t fnin = cpu->f & Z80_FLAG_N;
-    uint8_t corr = 0;
-    uint8_t new_c = 0;
-
-    if ((a & 0x0F) > 9 || fhin) corr |= 0x06;
-    if (a > 0x99 || fcin)       { corr |= 0x60; new_c = Z80_FLAG_C; }
-
-    uint8_t new_a;
-    uint8_t new_h;
-    if (fnin) {
-        new_a = a - corr;
-        new_h = (fhin && (a & 0x0F) < 6) ? Z80_FLAG_H : 0;
-    } else {
-        new_a = a + corr;
-        new_h = ((a & 0x0F) > 9) ? Z80_FLAG_H : 0;
-    }
-
-    cpu->a = new_a;
-    uint8_t f = fnin | new_c | new_h | xy_from(new_a);
-    if (new_a == 0) f |= Z80_FLAG_Z;
-    if (new_a & 0x80) f |= Z80_FLAG_S;
-    f |= parity8(new_a);
-    cpu->f = f;
+    daa_compute(cpu->a, cpu->f, &cpu->a, &cpu->f);
     cpu->q = 1;
 }
 

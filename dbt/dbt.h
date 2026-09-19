@@ -6,17 +6,19 @@
  * that can trap) ends the block early and the run loop steps the
  * interpreter for that single instruction before retrying the JIT.
  *
- * Block ABI (AArch64): guest hot state is PINNED in callee-saved host
- * registers across blocks and chains:
+ * Block ABI: guest hot state is PINNED in host registers across blocks
+ * and chains. AArch64 (dbt_a64.c):
  *   X19 = z80_cpu_t *cpu
  *   X20 = cpu->mem (uint8_t *)
  *   X21 = guest BC   X22 = guest DE   X23 = guest HL   X26 = guest SP
  *   X27 = guest A    X28 = guest F    (all canonical zero-extended)
- *   X24 = JIT aux base (&dbt->jit_ftables: flag tables +0, code bitmap
- *         +0x10000, block cache +0x20000)
+ *   X24 = JIT aux base (&dbt->jit_ftables: flag tables +0, DAA table
+ *         +0x400, code bitmap +0x10000, block cache +0x20000)
  *   X25 = pending insn count
- * The trampoline loads the pinned set from the context and BRs into the
- * block; blocks chain to each other with the state live and exit by
+ * x86-64 (dbt_x64.c): RBX=cpu R12=mem R13=aux R14=HL R15=BC RBP=DE
+ *   R8=SP RCX=A RDX=F R9=count; RAX/RSI/RDI/R10/R11 scratch.
+ * The trampoline loads the pinned set from the context and jumps into
+ * the block; blocks chain to each other with the state live and exit by
  * branching to a shared exit stub that spills everything back to the
  * context and unwinds the trampoline frame. cpu->* is only authoritative
  * outside JIT execution (and inside helper calls, which sync explicitly).
@@ -111,12 +113,13 @@ typedef struct {
      * pinned base register (X24 = &jit_ftables), using fixed offsets:
      *   +0x00000  jit_ftables  — copy of z80_f_tables (result-indexed
      *                            flag bytes; see dbt_flags.h)
+     *   +0x00400  DAA table    — copy of z80_daa_table, in the pad
      *   +0x10000  code_bitmap  — reached via ADD #16, LSL#12
      *   +0x20000  cache        — reached via ADD #32, LSL#12
      * The members must stay in this order with these exact sizes; the
      * _Static_asserts after the struct pin the layout. */
     _Alignas(16) uint8_t jit_ftables[1024];
-    uint8_t  _aux_pad[0x10000 - 1024];
+    uint8_t  _aux_pad[0x10000 - 1024];   /* DAA table lives at +FT_DAA */
 
     /* Per-guest-byte tag: nonzero iff some currently-cached block covers
      * this byte. JIT-emitted stores call into z80_jit_post_store(), which
@@ -232,16 +235,17 @@ void dbt_mark_block_bytes(z80_dbt_t *dbt, uint16_t start, uint32_t end);
  *
  * dbt_emit_trampoline: emit a one-shot host-arch shim at the start of
  *   dbt->code_buf, called from C as
- *     void (*)(z80_cpu_t *cpu, uint8_t *mem, void *block, void *cache_base);
- *   The trampoline saves callee-saved regs, binds X19/X20/X21 (or the x64
- *   equivalents), BLRs into `block`, and returns.
+ *     void (*)(z80_cpu_t *cpu, uint8_t *mem, void *block, void *aux);
+ *   The trampoline saves callee-saved regs, binds the pinned register
+ *   set, jumps into `block`, and (via the exit stub) returns.
  * ---------------------------------------------------------------------- */
 uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc);
 void     dbt_emit_trampoline(z80_dbt_t *dbt);
 
-/* Rewrite the patchable B at `site_off` to jump to `target`, or back to
- * its probe fallback (site + 4) when target is NULL. Caller must hold
- * the W^X writable bracket; the I-cache flush happens here. */
+/* Rewrite the patchable branch at `site_off` to jump to `target`, or
+ * back to its probe fallback (the next instruction) when target is NULL.
+ * Caller must hold the W^X writable bracket; any I-cache flush happens
+ * here. */
 void dbt_arch_patch_link(z80_dbt_t *dbt, uint32_t site_off, uint8_t *target);
 
 #endif /* DBT_H */

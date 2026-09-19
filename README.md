@@ -10,13 +10,15 @@ No good reason. Maximum vibes.
 
 Single core, JIT unless noted:
 
-| Workload | M5 Max MacBook | Raspberry Pi 4 |
-|----------|----------------|----------------|
-| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** | **532 MIPS** |
-| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** | **0.47 BIPS** |
-| Same workloads, reference interpreter | ~230 MIPS | ~24 MIPS |
+| Workload | M5 Max MacBook | Xeon 8259CL VM (x86-64) | Raspberry Pi 4 |
+|----------|----------------|-------------------------|----------------|
+| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** | **1.69 BIPS** | **532 MIPS** |
+| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** | **1.22 BIPS** | **0.47 BIPS** |
+| Same workloads, reference interpreter | ~230 MIPS | ~70 MIPS | ~24 MIPS |
 
 The Pi 4 (Cortex-A72 @ 1.5 GHz, Debian 11, GCC 10, Linux/aarch64) built from a clean clone with no source changes; zexdoc and zexall pass 67/67 under the JIT, and the full zexdoc run passes under `-V` lockstep verification in six minutes. No Mac required.
+
+The x86-64 column is a 4-vCPU cloud VM (Xeon Platinum 8259CL, 2.5 GHz base, Ubuntu 24.04, GCC 13) — a much slower core than the M5, and a hypervisor with no performance counters. Same clean tree, same 67/67 on zexdoc and zexall, and both full exercisers pass under `-V` lockstep in about two minutes each.
 
 The JIT's interpreter-fallback rate on real workloads is ~0.02% — essentially everything runs as translated native code. Real software runs today: Zork 1, MS COBOL (the compiler *and* its output), and the zexdoc/zexall instruction exercisers pass 67/67 with correct CRCs.
 
@@ -24,12 +26,13 @@ The JIT's interpreter-fallback rate on real workloads is ~0.02% — essentially 
 
 This is a **dynamic binary translator** (DBT) first, interpreter second. The interpreter is the golden reference; the translator is the monster. The big levers, in the order they landed:
 
-- **Pinned guest registers.** BC, DE, HL, SP, A, and F live permanently in AArch64 callee-saved registers across translated blocks *and* across block-to-block chains. `LD A,B` is one host instruction. `(HL)` accesses need no address load at all. Guest state only touches memory at JIT entry/exit and around the two remaining helper calls (DAA, LDIR/LDDR).
+- **Pinned guest registers.** BC, DE, HL, SP, A, and F live permanently in host registers across translated blocks *and* across block-to-block chains — six AArch64 callee-saved registers, or ten of x86-64's fifteen GPRs (A and F sit in RCX/RDX, where the 8080-descended `LAHF` drops S/Z/H/C into exactly the Z80's bit positions, so the add/sub family builds its flags from the host's). `LD A,B` is one host instruction. `(HL)` accesses need no address load at all. Guest state only touches memory at JIT entry/exit and around the one remaining helper call (LDIR/LDDR).
 - **Direct block linking.** Every statically-known control-flow edge — fall-through, `JP`, `JR`, `CALL`, and both arms of every conditional — is a patchable branch aimed directly at the target block's native code. A hot loop's back-edge is literally `TST; B.cond; B` into the next translation. Blocks never return to the dispatcher until they must.
 - **Superblocks.** Conditional branches don't end translation: the taken arm becomes an out-of-line side exit and the translator keeps going through the fall-through, so straight-line runs cross `JR cc` / `DJNZ` / `RET cc` without paying a block boundary. Length is capped in guest bytes because block span is also the self-modifying-code invalidation window — everything is a trade.
 - **Dead-flag elimination.** The Z80 sets flags on nearly every instruction; almost nobody looks at them. A backward liveness pass over each block computes, per instruction and per flag bit, which bits can actually be observed — and the emitters skip the rest. `ADD` before another `ADD` emits no flag code at all; `ADD` before `JR C` emits just the carry. What survives is assembled inline from result-indexed lookup tables plus a few identities (carry-recovery for H, sign-xor for V) — no helper calls, no runtime lazy-flag descriptors, all decided at translation time.
-- **Self-modifying-code tracking that doesn't give up.** A per-byte code bitmap makes every guest store check whether it just clobbered translated code (one ADD+LDRB+CBZ on the fast path). And because the block cache maps guest PCs 1:1, each entry records its block's exact byte span, so an invalidating store kills only the blocks that truly cover the written byte — zexdoc patches its test instruction 7.4 million times and re-runs it, and the invalidation, unlink, and retranslation machinery survives the full run in lockstep with the interpreter.
+- **Self-modifying-code tracking that doesn't give up.** A per-byte code bitmap makes every guest store check whether it just clobbered translated code (one ADD+LDRB+CBZ on the fast path; a single `cmp byte [bitmap+addr],0` on x86-64). And because the block cache maps guest PCs 1:1, each entry records its block's exact byte span, so an invalidating store kills only the blocks that truly cover the written byte — zexdoc patches its test instruction 7.4 million times and re-runs it, and the invalidation, unlink, and retranslation machinery survives the full run in lockstep with the interpreter.
 - **Block-op intrinsics.** LDIR/LDDR run as host-speed copies with the documented overlap semantics and a batched SMC sweep.
+- **A mirrored 64K boundary.** Guest memory is a shared-memory object mapped twice, so the page after 0xFFFF *is* page zero. A 16-bit PUSH/POP/CALL/RET at the top of memory wraps exactly like the silicon with a single host access — no masking, no split byte stores — and every writer (JIT, interpreter, loader, LDIR) keeps the mirror coherent for free.
 
 ### Verification
 
@@ -42,7 +45,7 @@ The correctness story is as unreasonable as the performance story:
 ## Layout
 
 - `core/` — Z80 decoder, reference interpreter, CPU state
-- `dbt/` — the translator: AArch64 backend, block cache, direct-link registry, flag tables, SMC tracking, shadow verify
+- `dbt/` — the translator: AArch64 and x86-64 backends, block cache, direct-link registry, flag tables, SMC tracking, shadow verify
 - `cpm/` — BDOS/BIOS shims, `.COM` loader, host-directory-as-drive-A: mapping
 - `kaypro/` — machine personality (early stub; terminal video/keyboard to come)
 - `tests/`, `tools/`, `bench/` — generated test programs and the COBOL benchmark harness
@@ -50,7 +53,7 @@ The correctness story is as unreasonable as the performance story:
 
 ## Building & Running
 
-Requires an AArch64 host for the JIT (developed on Apple Silicon macOS; the x86-64 backend is a stub that falls back to the interpreter).
+Builds and JITs on AArch64 (developed on Apple Silicon macOS, confirmed on Linux) and x86-64 (Linux). The Makefile picks the backend from `uname -m`.
 
 ```bash
 make
@@ -63,11 +66,15 @@ make bench                                    # SQUARO benchmark, jit vs interp
 
 The directory containing the `.COM` file becomes drive A:. Console I/O is raw termios with buffered output.
 
+Set `Z80_JIT_DUMP=/path/file` to have the JIT write its raw code buffer (and a `file.idx` of guest-PC → code-offset) at exit — feed the offsets to `objdump -D -b binary -m i386:x86-64` (or `-m aarch64`) and `perf script` to see which translated blocks are hot.
+
 ## Status & Road to 10 BIPS
 
 Working today: the full documented + useful-undocumented instruction set split between translator and interpreter fallback, CP/M 2.2 BDOS/BIOS shims sufficient for real applications, SMC, and the verification machinery. Not yet: Kaypro terminal emulation, interrupts, banked memory (CP/M 3), cycle counting (we lie cheerfully).
 
-The general-purpose levers are now *all* pulled. Memptr dead-store elision and per-entry SMC windows landed (the latter took zexdoc from 2.0 to 3.3 BIPS and cut the full lockstep-verify run from four minutes to 46 seconds); the ones that didn't survive measurement are documented at the scene so nobody builds them twice — a hardware-paired return-address stack for `RET` (consistent loss; Apple Silicon's indirect-branch predictor already nails the inline cache probe), sinking the per-exit q/count bookkeeping across chained edges (2–3% ceiling, and it costs the lockstep-verify invariant), longer superblocks (the cap barely binds; blocks end at natural control flow first), and inline LDIR fast paths (our current workloads execute almost no LDIRs — that one waits for WordStar). What remains is the endgame the design docs promised from day one: per-application specialization — recognizing WordStar's screen loop or dBASE's B-tree walk and cheating accordingly. The target is still a status line that says **10 BIPS** while WordStar search-and-replaces a 50-page document before the keyboard interrupt returns; the road there is now paved with special cases, and we are at peace with that.
+The x86-64 backend landed as a structural mirror of the AArch64 one, with the x86 idioms where they pay: native 8-bit ALU ops plus `LAHF`/`SETO` for the add/sub flag family, memory operands for `(HL)` and `(IX+d)`, a table for DAA (COBOL's decimal runtime hits it constantly), and 16-bit stack accesses courtesy of the mirrored 64K boundary. Its profile on SQUARO says the remaining cost is instruction count at the block tails (`ADD HL,rr` with every flag live at a block exit is 17 host instructions; the `RET` probe is another five) — a hardware-paired return stack is worth re-measuring on x86, where it lost on Apple Silicon.
+
+The general-purpose levers are now *all* pulled on AArch64. Memptr dead-store elision and per-entry SMC windows landed (the latter took zexdoc from 2.0 to 3.3 BIPS and cut the full lockstep-verify run from four minutes to 46 seconds); the ones that didn't survive measurement are documented at the scene so nobody builds them twice — a hardware-paired return-address stack for `RET` (consistent loss; Apple Silicon's indirect-branch predictor already nails the inline cache probe), sinking the per-exit q/count bookkeeping across chained edges (2–3% ceiling, and it costs the lockstep-verify invariant), longer superblocks (the cap barely binds; blocks end at natural control flow first), and inline LDIR fast paths (our current workloads execute almost no LDIRs — that one waits for WordStar). What remains is the endgame the design docs promised from day one: per-application specialization — recognizing WordStar's screen loop or dBASE's B-tree walk and cheating accordingly. The target is still a status line that says **10 BIPS** while WordStar search-and-replaces a 50-page document before the keyboard interrupt returns; the road there is now paved with special cases, and we are at peace with that.
 
 ## Gotchas
 
@@ -75,7 +82,7 @@ Someone asked whether buying an Apple Silicon laptop and loading this gets you "
 
 1. **It doesn't boot CP/M.** There is no `A>` prompt and no CCP. You run one `.COM` from the host shell, and the BDOS/BIOS underneath it is a shim written in C that maps a host directory to drive A: and talks to your terminal. It's a program runner, not a machine. Booting real system images is on the list, after terminal emulation.
 2. **You can't experience 8,000× at a prompt anyway.** A prompt waits for a human at any speed. The speed shows in compute: MS-COBOL 4.65 compiles and links a program before the terminal finishes repainting. Anything that needs real terminal emulation — WordStar, dBASE — doesn't run yet, because the Kaypro screen/keyboard personality is a stub and there are no interrupts. Programs that only need BDOS console I/O (Zork) run fine.
-3. **Apple isn't required, but ARM64 is — for now.** The translator emits AArch64. The only macOS-specific bit is the W^X page-flipping dance Apple requires for JITs, and it's behind an `#ifdef` in `dbt/dbt.h`. Linux/aarch64 is confirmed (Raspberry Pi 4, numbers above); FreeBSD/aarch64 should build and JIT but nobody has tried, and reports are welcome. On x86-64 there's no backend yet — and that's a *yet*: the authors' other DBTs (RISC-V, a custom ISA, and a 6809 whole-machine emulator) all have first-class AMD64 backends. This one was designed on AArch64's 31 GPRs first, and porting the register-pinning scheme to x86-64's smaller callee-saved set is a triage problem, not a research problem. Until then, x86-64 falls back to the reference interpreter at ~230 MIPS — still ~460× a 4 MHz Z80.
+3. **Apple isn't required, and neither is ARM64.** The translator has AArch64 and x86-64 backends that share everything above the instruction encoders — the same decoder, liveness pass, superblocks, link registry, and SMC tracking. The only macOS-specific bit is the W^X page-flipping dance Apple requires for JITs, behind an `#ifdef` in `dbt/dbt.h`. Linux/aarch64 is confirmed (Raspberry Pi 4) and Linux/x86-64 is confirmed (numbers above); FreeBSD should build and JIT on either but nobody has tried, and reports are welcome. The x86-64 backend was the triage problem it was predicted to be: ten pinned registers out of fifteen leaves five scratch, and the pinned caller-saved ones get pushed around the rare helper calls.
 4. **4.3 BIPS was measured on an M5 Max**, not a base-model chip. It's single-threaded, so the gap on a smaller M-series part won't be dramatic, but no number is quoted here that wasn't measured.
 5. **There is no good reason for any of this.** It's a dynamic binary translator research toy: the same techniques used on RISC-V and a custom ISA, pointed at the most irregular 8-bit ISA ever shipped in volume, to see how far static dead-flag elimination and self-modifying-code tracking can be pushed. The design document is the phrase "10 BIPS CP/M monster for no good reason."
 

@@ -1,8 +1,9 @@
 /* dbt_flags.h — eager flag-computation helpers, callable from JIT blocks.
  *
- * Each helper has the AAPCS64 calling convention so the translator can
- * MOV X0, X19 ; MOVZ/K X9, <addr> ; BLR X9 around it. All write cpu->a
- * (where the op stores into A) and cpu->f, and set cpu->q = 1.
+ * Each helper uses the platform C calling convention (cpu in the first
+ * argument register) so a translated block can call it after syncing
+ * the pinned state it reads. All write cpu->a (where the op stores into
+ * A) and cpu->f, and set cpu->q = 1.
  *
  * Semantics mirror set_flags_add/sub/cp/logic in core/z80_interp.c —
  * keep them in lock-step or the JIT will diverge from the interpreter
@@ -28,10 +29,19 @@
 extern uint8_t z80_f_tables[1024];
 void z80_flag_tables_init(void);
 
+/* DAA lookup table, also placed in the JIT aux block (at byte offset
+ * FT_DAA from the flag tables — inside the padding before the code
+ * bitmap). Indexed by ((F & (C|N|H)) << 8) | A, i.e. C at bit 8, N at
+ * bit 9, H at bit 12; each uint16 entry is (F' << 8) | A'. The index
+ * range with those bit positions is 0x1400 entries. */
+#define FT_DAA        0x400
+#define DAA_TABLE_LEN 0x1400
+extern uint16_t z80_daa_table[DAA_TABLE_LEN];
+
 /* 8-bit ALU writing A. ADC/SBC also read the carry input from cpu->f.
- * NOTE: the AArch64 backend now emits these inline (see emit_alu_inline
- * in dbt_a64.c); the helpers remain as the reference implementation and
- * for future backends. */
+ * NOTE: both backends emit these inline (see emit_alu_inline in
+ * dbt_a64.c / dbt_x64.c); the helpers remain as the reference
+ * implementation. */
 void z80_jit_add(z80_cpu_t *cpu, uint8_t b);
 void z80_jit_adc(z80_cpu_t *cpu, uint8_t b);
 void z80_jit_sub(z80_cpu_t *cpu, uint8_t b);

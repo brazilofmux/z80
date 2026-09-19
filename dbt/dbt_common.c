@@ -41,6 +41,7 @@ int dbt_init(z80_dbt_t *dbt, z80_cpu_t *cpu) {
     /* JIT blocks index the flag tables through the pinned aux base (X24),
      * so keep a copy at aux offset 0. Helpers still use the global. */
     memcpy(dbt->jit_ftables, z80_f_tables, sizeof(z80_f_tables));
+    memcpy((uint8_t *)dbt->jit_ftables + FT_DAA, z80_daa_table, sizeof(z80_daa_table));
     dbt_cache_invalidate_all(dbt);
 
     dbt->code_buf = mmap(NULL, CODE_BUF_SIZE,
@@ -58,7 +59,34 @@ int dbt_init(z80_dbt_t *dbt, z80_cpu_t *cpu) {
     return 0;
 }
 
+/* Z80_JIT_DUMP=<path>: at cleanup, write the raw code buffer to <path>
+ * and a "guest_pc code_offset" index to <path>.idx, so the translated
+ * code can be disassembled (objdump -D -b binary -m <arch>) and hot
+ * blocks located from perf samples. Debug aid only. */
+static void dbt_dump_code(z80_dbt_t *dbt) {
+    const char *path = getenv("Z80_JIT_DUMP");
+    if (!path || !dbt->code_buf) return;
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fwrite(dbt->code_buf, 1, dbt->code_used, f);
+        fclose(f);
+    }
+    char idx_path[4096];
+    snprintf(idx_path, sizeof idx_path, "%s.idx", path);
+    f = fopen(idx_path, "w");
+    if (!f) return;
+    fprintf(f, "# code_buf=%p exit_stub=%u\n", (void *)dbt->code_buf, dbt->exit_stub_off);
+    for (uint32_t i = 0; i < BLOCK_CACHE_SIZE; i++) {
+        const z80_block_entry_t *be = &dbt->cache[i];
+        if (be->guest_pc == BLOCK_EMPTY_PC || !be->native_code) continue;
+        fprintf(f, "%04X %u %u\n", be->guest_pc,
+                (unsigned)(be->native_code - dbt->code_buf), be->span);
+    }
+    fclose(f);
+}
+
 void dbt_cleanup(z80_dbt_t *dbt) {
+    dbt_dump_code(dbt);
     if (dbt->cpu) dbt->cpu->dbt = NULL;
     if (dbt->code_buf && dbt->code_buf != MAP_FAILED) {
         munmap(dbt->code_buf, CODE_BUF_SIZE);

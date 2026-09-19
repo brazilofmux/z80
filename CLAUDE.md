@@ -58,14 +58,23 @@ typedef struct {
 } z80_ctx_t;
 ```
 
-**Register caching strategy** (the key to BIPS — SHIPPED on AArch64):
+**Register caching strategy** (the key to BIPS — SHIPPED on both backends):
 
-- BC/DE/HL/SP/A/F are pinned in callee-saved host registers
-  (X21/X22/X23/X26/X27/X28) across blocks AND block chains; X24 holds a
-  single aux base serving flag tables, the SMC bitmap, and the block
-  cache at fixed offsets. See the convention comment atop `dbt/dbt_a64.c`.
+- BC/DE/HL/SP/A/F are pinned in host registers across blocks AND block
+  chains; one aux base register serves the flag tables, the DAA table,
+  the SMC bitmap, and the block cache at fixed offsets.
+  - AArch64: callee-saved X21/X22/X23/X26/X27/X28, aux in X24, pending
+    insn count in X25. See the convention comment atop `dbt/dbt_a64.c`.
+  - x86-64: RBX=cpu, R12=mem, R13=aux, R14=HL, R15=BC, RBP=DE, R8=SP,
+    RCX=A, RDX=F, R9=count; RAX/RSI/RDI/R10/R11 scratch. A/F live in
+    RCX/RDX because `LAHF` yields S Z - H - P N C in Z80 bit order, so
+    ADD/SUB/ADC/SBC/CP build F from native flags. The caller-saved
+    pinned registers are pushed around helper calls. See atop
+    `dbt/dbt_x64.c`.
 - IX/IY/memptr/q stay context-resident (cooler paths).
-- On x86-64 (future): fewer GPRs, the pairs will need triage.
+- Guest memory is mapped with a mirror page past 0xFFFF
+  (`z80_mem_alloc`), so backends may use 16-bit accesses for stack ops
+  with exact wrap semantics when `z80_mem_mirrored` is set.
 
 ## The Eternal War: Flags
 

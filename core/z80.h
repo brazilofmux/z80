@@ -286,6 +286,13 @@ const char *z80_op_name(z80_op_type t);
 /* Initialize a CPU context with 64KB of memory */
 void z80_cpu_init(z80_cpu_t *cpu);
 
+/* Guest memory allocation (core/z80_state.c). When z80_mem_mirrored is
+ * nonzero, mem[0x10000 + k] aliases mem[k] for k below the host page
+ * size, so a 16-bit access at 0xFFFF wraps exactly like the Z80. */
+uint8_t *z80_mem_alloc(void);
+void     z80_mem_free(uint8_t *mem);
+extern int z80_mem_mirrored;
+
 /* Reset (like power-on or RST 0) */
 void z80_cpu_reset(z80_cpu_t *cpu);
 
