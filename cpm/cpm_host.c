@@ -132,11 +132,23 @@ static int disk_io(z80_cpu_t *cpu, int write) {
 
 /* ---- the ports ------------------------------------------------------- */
 
+/* Host events (HUD tick, window resize, ^C) are flagged from a signal
+ * handler and normally serviced by the run loops between blocks. A
+ * native CP/M program idling at the keyboard never gets there: its
+ * CONST loop is a chain of translated blocks with the port access
+ * inlined, so the console ports service the flag themselves. */
+static inline void host_events(z80_cpu_t *cpu) {
+    if (cpu->host_event) {
+        cpu->host_event = 0;
+        if (cpu->on_host_event) cpu->on_host_event(cpu);
+    }
+}
+
 static uint8_t host_in(z80_cpu_t *cpu, uint8_t port, uint8_t high) {
-    (void)cpu; (void)high;
+    (void)high;
     switch (port) {
-    case 0xE0: return cpm_constat();
-    case 0xE1: return cpm_conin();
+    case 0xE0: host_events(cpu); return cpm_constat();
+    case 0xE1: host_events(cpu); return cpm_conin();
     case 0xE3: return 0x1A;                                   /* reader: end of tape */
     case 0xE8: return (uint8_t)cpm_host_drive_type(cur_drive);
     case 0xEF: return last_result;

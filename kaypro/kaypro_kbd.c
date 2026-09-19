@@ -196,9 +196,21 @@ static int stdin_readable(long wait_us) {
     FD_SET(STDIN_FILENO, &rfds);
     struct timeval tv = { wait_us / 1000000, wait_us % 1000000 };
     int ret;
-    do {
+    for (;;) {
         ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, wait_us < 0 ? NULL : &tv);
-    } while (ret < 0 && errno == EINTR);
+        if (ret >= 0 || errno != EINTR) break;
+        /* A signal (HUD tick, window resize, ^C) interrupted the wait.
+         * The run loops would service it between blocks, but a guest
+         * blocked in CONIN is not running any: do it here, then wait
+         * on. (The timed form re-waits the full interval; it is used
+         * for a few milliseconds at most.) */
+        if (attached_cpu && attached_cpu->host_event) {
+            attached_cpu->host_event = 0;
+            if (attached_cpu->on_host_event) attached_cpu->on_host_event(attached_cpu);
+        }
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+    }
     return ret > 0 && FD_ISSET(STDIN_FILENO, &rfds);
 }
 

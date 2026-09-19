@@ -401,7 +401,9 @@ int main(int argc, char **argv) {
             kaypro_render_tty_init();
             atexit(kaypro_render_tty_shutdown);
             if (g_hud) {
-                const char *base = strrchr(final_prog, '/');
+                /* The .COM's basename; the native-boot label ("CP/M 2.2")
+                 * is not a path, its slash stays. */
+                const char *base = n_drives > 0 && !prog ? NULL : strrchr(final_prog, '/');
                 g_hud_prog = base ? base + 1 : final_prog;
                 struct itimerval it = { {0, 250000}, {0, 250000} };
                 setitimer(ITIMER_REAL, &it, NULL);
