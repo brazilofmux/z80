@@ -4,10 +4,7 @@
 
 # Binaries we build (keep the .c sources)
 z80-monster
-tools/mkhello
-tools/mkblock
-tools/mkcb
-tools/mkalu
+tools/mk*
 
 # Future generated test binaries
 tests/*.com
