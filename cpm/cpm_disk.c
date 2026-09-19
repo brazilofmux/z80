@@ -295,6 +295,7 @@ int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
     size_t n = fread(disk_io_buf, 1, 128, fp);
     if (n > 0) {
         memcpy(&cpu->mem[current_dma], disk_io_buf, n);
+        z80_mem_host_wrote(cpu, current_dma, (uint32_t)n);
     }
     if (n == 0) {
         cpu->a = 1; /* EOF */
@@ -376,6 +377,7 @@ int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
     size_t n = fread(disk_io_buf, 1, 128, fp);
     if (n > 0) {
         memcpy(&cpu->mem[current_dma], disk_io_buf, n);
+        z80_mem_host_wrote(cpu, current_dma, (uint32_t)n);
     }
     if (n == 0) {
         if (cpm_debug)
@@ -612,6 +614,7 @@ int cpm_bdos_search_first(z80_cpu_t *cpu, uint16_t fcb_addr)
 
         if (fcb_name_matches(fcb, ent->d_name)) {
             fill_dir_entry(&cpu->mem[current_dma], ent->d_name, fcb[0]);
+            z80_mem_host_wrote(cpu, current_dma, 32);
             cpu->a = 0;
             return 1;
         }
@@ -638,6 +641,7 @@ int cpm_bdos_search_next(z80_cpu_t *cpu)
 
         if (fcb_name_matches(search_fcb, ent->d_name)) {
             fill_dir_entry(&cpu->mem[current_dma], ent->d_name, search_fcb[0]);
+            z80_mem_host_wrote(cpu, current_dma, 32);
             cpu->a = 0;
             return 1;
         }
@@ -679,4 +683,30 @@ static void make_host_path(const char *name, char *out, size_t outlen)
         strncpy(out, name, outlen);
         out[outlen - 1] = 0;
     }
+}
+/* BDOS 23 RENAME: the FCB holds the old name at +0 and the new name at
+ * +16 (drive byte of the second half ignored). Any slot still open on
+ * this FCB is closed first; CP/M programs close before renaming anyway. */
+int cpm_bdos_rename(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    uint8_t *fcb = &cpu->mem[fcb_addr];
+    int slot = get_file_slot_from_fcb(fcb_addr);
+    if (slot >= 0) {
+        fclose(open_files[slot].fp);
+        open_files[slot].fp = NULL;
+        open_fcb_addr[slot] = 0;
+    }
+    char oldn[16], newn[16], oldp[PATH_MAX], newp[PATH_MAX];
+    fcb_to_host_name(fcb, oldn, sizeof oldn);
+    fcb_to_host_name(fcb + 16, newn, sizeof newn);
+    make_host_path(oldn, oldp, sizeof oldp);
+    make_host_path(newn, newp, sizeof newp);
+    if (cpm_debug)
+        fprintf(stderr, "  [rename] %s -> %s\n", oldn, newn);
+    if (!oldp[0] || !newp[0] || rename(oldp, newp) != 0) {
+        cpu->a = 0xFF;
+        return 1;
+    }
+    cpu->a = 0;
+    return 1;
 }

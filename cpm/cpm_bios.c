@@ -149,7 +149,9 @@ uint8_t cpm_conin(void) {
         /* The script is over and the guest wants more: the session ends
          * here. exit() runs the atexit chain (screen dump, terminal
          * restore) exactly as a normal exit would. */
-        fprintf(stderr, "[exit] script ended, guest waiting for input\n");
+        fprintf(stderr, "[exit] script ended, guest waiting for input "
+                        "(%llu polls, longest quiet run %u)\n",
+                (unsigned long long)kaypro_kbd_polls(), kaypro_kbd_max_quiet_streak());
         exit(0);
     }
     return (uint8_t)ch;
@@ -194,6 +196,7 @@ void cpm_read_console_buffer(z80_cpu_t *cpu, uint16_t de) {
      * without affecting later, well-behaved DMA usage.
      */
     memset(&cpu->mem[0x80], 0, 128);
+    z80_mem_host_wrote(cpu, 0x80, 128);
 
     uint8_t len = 0;
     buf[1] = 0;
@@ -235,6 +238,7 @@ void cpm_read_console_buffer(z80_cpu_t *cpu, uint16_t de) {
     }
 
     buf[1] = len;
+    z80_mem_host_wrote(cpu, de, 2u + len);
     cpu->a = 0;
 }
 

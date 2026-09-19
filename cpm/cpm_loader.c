@@ -65,7 +65,17 @@ int cpm_load_com(z80_cpu_t *cpu, const char *path) {
     cpu->mem[cpu->sp]     = 0x00;
     cpu->mem[cpu->sp + 1] = 0x00;
 
-    /* Many .COM programs expect C=0 or the CCP command line at 0x0080 */
+    /* Page zero as the CCP leaves it for a command with no arguments:
+     * the two default FCBs at 0x5C and 0x6C hold blank names (drive 0,
+     * eleven spaces, EX/S1/S2/RC zero) and the command tail at 0x80 is
+     * empty (length byte 0). Programs test fcb[1] == ' ' to decide
+     * whether a file was named on the command line — WordStar treated
+     * the previous all-zero FCB as a file called "\0\0\0..." and lost
+     * the name typed at its own prompt. C=0 like the CCP's "no drive". */
+    memset(&cpu->mem[0x5C], 0, 0x24);
+    memset(&cpu->mem[0x5D], ' ', 11);
+    memset(&cpu->mem[0x6D], ' ', 11);
+    cpu->mem[0x80] = 0;
     cpu->c = 0;
 
     /* Make sure the BDOS trampoline is there */

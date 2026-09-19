@@ -684,12 +684,12 @@ int z80_step(z80_cpu_t *cpu) {
     case Z80_OP_JP_NN:
         cpu->pc = dec.imm16;
         cpu->memptr = dec.imm16;
-        if (cpu->pc == CPM_BDOS_ENTRY) {
+        if (!cpu->defer_traps && cpu->pc == CPM_BDOS_ENTRY) {
             int cont = cpm_bdos_dispatch(cpu);
             if (!cont) return 1;
             cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
             cpu->sp = (cpu->sp + 2) & 0xFFFF;
-        } else if (cpu->pc >= CPM_BIOS_BASE && cpu->pc < CPM_BIOS_BASE + 0x80) {
+        } else if (!cpu->defer_traps && cpu->pc >= CPM_BIOS_BASE && cpu->pc < CPM_BIOS_BASE + 0x80) {
             int cont = cpm_bios_dispatch(cpu);
             if (!cont) return 1;
             cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
@@ -702,12 +702,12 @@ int z80_step(z80_cpu_t *cpu) {
         cpu->memptr = dec.imm16;
         if (cond_true(cpu, dec.cc)) {
             cpu->pc = dec.imm16;
-            if (cpu->pc == CPM_BDOS_ENTRY) {
+            if (!cpu->defer_traps && cpu->pc == CPM_BDOS_ENTRY) {
                 int cont = cpm_bdos_dispatch(cpu);
                 if (!cont) return 1;
                 cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
                 cpu->sp = (cpu->sp + 2) & 0xFFFF;
-            } else if (cpu->pc >= CPM_BIOS_BASE && cpu->pc < CPM_BIOS_BASE + 0x80) {
+            } else if (!cpu->defer_traps && cpu->pc >= CPM_BIOS_BASE && cpu->pc < CPM_BIOS_BASE + 0x80) {
                 int cont = cpm_bios_dispatch(cpu);
                 if (!cont) return 1;
                 cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
@@ -726,12 +726,12 @@ int z80_step(z80_cpu_t *cpu) {
     case Z80_OP_JP_HL:
         cpu->pc = cpu->hl;
         /* CP/M vector indirection (BDOS at 0005 or BIOS via 0001) */
-        if (cpu->pc == CPM_BDOS_ENTRY) {
+        if (!cpu->defer_traps && cpu->pc == CPM_BDOS_ENTRY) {
             int cont = cpm_bdos_dispatch(cpu);
             if (!cont) return 1;
             cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
             cpu->sp = (cpu->sp + 2) & 0xFFFF;
-        } else if (cpu->pc >= CPM_BIOS_BASE && cpu->pc < CPM_BIOS_BASE + 0x80) {
+        } else if (!cpu->defer_traps && cpu->pc >= CPM_BIOS_BASE && cpu->pc < CPM_BIOS_BASE + 0x80) {
             int cont = cpm_bios_dispatch(cpu);
             if (!cont) return 1;
             cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
@@ -760,7 +760,7 @@ int z80_step(z80_cpu_t *cpu) {
         cpu->memptr = dec.imm16;
 
         /* CP/M BDOS / warm boot trap */
-        if (cpu->pc == CPM_BDOS_ENTRY || cpu->pc == CPM_WBOOT_ENTRY) {
+        if (!cpu->defer_traps && (cpu->pc == CPM_BDOS_ENTRY || cpu->pc == CPM_WBOOT_ENTRY)) {
             int cont = cpm_bdos_dispatch(cpu);
             if (!cont) {
                 /* Program terminated via BDOS 0 or unknown call */
@@ -775,7 +775,7 @@ int z80_step(z80_cpu_t *cpu) {
          * vectors at BIOS_BASE and jumps to the call-gate area.
          * This is required for the classic "LD HL,(0001); ADD HL,DE; JP (HL)" pattern.
          */
-        if (cpu->pc >= CPM_BIOS_BASE &&
+        if (!cpu->defer_traps && cpu->pc >= CPM_BIOS_BASE &&
             cpu->pc <  CPM_BIOS_BASE + 0x80) {          /* generous range covering vectors + gates */
             int cont = cpm_bios_dispatch(cpu);
             if (!cont) {

@@ -49,6 +49,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 int dbt_jit_available(void) { return 1; }
 
@@ -438,7 +439,17 @@ static void emit_tail_prologue(emit_t *e, uint32_t insn_count_delta, int q_mode)
  * One LDP fetches the whole 16-byte entry — the pad bytes ride in
  * X15's high half, which the 32-bit compare ignores. The cache index
  * is exactly `pc` since BLOCK_CACHE_MASK == 0xFFFF. */
+/* Z80_VERIFY_STRICT=1 under -V: every block returns to dbt_run — no
+ * direct links, no inline cache probe — so the lockstep comparison runs
+ * after every block instead of after every chained run. Slow, and the
+ * way to localise a divergence to one block. */
+static int s_strict_exit = -1;
+
 static void emit_dynamic_tail(emit_t *e, uint32_t exit_stub_off) {
+    if (s_strict_exit > 0) {
+        emit_b(e, (int32_t)exit_stub_off - (int32_t)emit_pos(e));
+        return;
+    }
     emit_lsl_w32_imm(e, A64_W13, A64_W0, 4);
     emit_add_w32_imm_lsl12(e, A64_W13, A64_W13, AUX_CACHE_SEG);
     emit_add_x64_w32_uxtw(e, A64_W13, R_AUX, A64_W13);
@@ -468,6 +479,10 @@ static void emit_dynamic_tail(emit_t *e, uint32_t exit_stub_off) {
  * — a direct link without a record could never be unpatched after SMC. */
 static void emit_edge(z80_dbt_t *dbt, emit_t *e, uint16_t pc) {
     emit_movz_w32(e, A64_W0, pc, 0);
+    if (s_strict_exit > 0) {
+        emit_dynamic_tail(e, dbt->exit_stub_off);
+        return;
+    }
     uint32_t site = e->offset;
     int linked = 0;
     if (dbt_link_record(dbt, pc, site)) {
@@ -1933,6 +1948,8 @@ static void emit_branch_ender(z80_dbt_t *dbt, emit_t *e,
 }
 
 uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
+    if (s_strict_exit < 0)
+        s_strict_exit = dbt->verify && getenv("Z80_VERIFY_STRICT") != NULL;
     if (dbt->code_used + 32768 > CODE_BUF_SIZE) {
         /* Out of JIT space — blow away the cache and reset the cursor.
          * Cheap-and-cheerful; chained blocks would need patch-back here.

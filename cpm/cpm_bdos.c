@@ -130,7 +130,11 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
         return 1;
 
     case CPM_F_RESET:   /* 13 - Reset Disk System (very common at startup) */
-        cpm_disk_init();
+        /* CP/M 2.2: log out all drives, select A:, DMA back to 0x80 —
+         * and nothing else. Open FCBs stay valid; WordStar resets the
+         * disk system between overlay loads and keeps reading through
+         * the same FCB, and closing its files here produced its "E38
+         * bad overlay file". */
         cpm_set_dma(CPM_DEFAULT_DMA);
         cpu->a = 0;
         return 1;
@@ -155,6 +159,9 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
 
     case CPM_F_MAKE:     /* 22 - create file */
         return cpm_bdos_make_file(cpu, cpu->de);
+
+    case CPM_F_RENAME:   /* 23 - rename file (old FCB at DE, new name at DE+16) */
+        return cpm_bdos_rename(cpu, cpu->de);
 
     case CPM_F_DELETE:   /* 19 - delete file (by FCB) */
         return cpm_bdos_delete_file(cpu, cpu->de);

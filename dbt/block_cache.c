@@ -157,3 +157,11 @@ void z80_mem_w(z80_cpu_t *cpu, uint16_t addr, uint8_t val) {
         dbt_invalidate_for_store(dbt, addr);
     }
 }
+
+void z80_mem_host_wrote(z80_cpu_t *cpu, uint16_t addr, uint32_t len) {
+    if (!cpu->dbt) return;                 /* interpreter only: nothing cached */
+    for (uint32_t i = 0; i < len; i++) {
+        uint16_t a = (uint16_t)(addr + i);
+        z80_mem_w(cpu, a, cpu->mem[a]);    /* value already there; this is the invalidation */
+    }
+}

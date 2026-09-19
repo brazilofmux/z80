@@ -177,18 +177,11 @@ int dbt_run(z80_dbt_t *dbt) {
     z80_cpu_t *cpu = dbt->cpu;
     trampoline_fn_t trampoline = (trampoline_fn_t)(void *)dbt->code_buf;
 
-    /* Lazily initialise the parallel shadow on first -V entry.
-     *
-     * NOTE on -V and interactive programs: the shadow cpu's interp
-     * shares stdin/stdout with the real cpu — both execute BDOS dispatch
-     * and both call cpm_conin(), so each keystroke is consumed twice.
-     * That's fine for the OUTPUT (you just see characters duplicated)
-     * but breaks lockstep for INPUT: real and shadow read different
-     * bytes from the same stream and their cpu state diverges. zex* and
-     * any other output-only workloads work; Zork and other interactive
-     * programs will report spurious lockstep divergences whose AF bytes
-     * are the ASCII codes of consecutive keystrokes (e.g. real=0x71 'q'
-     * vs shadow=0x75 'u' from a piped "quit"). */
+    /* Lazily initialise the parallel shadow on first -V entry. Host
+     * services (BDOS/BIOS traps, port I/O) are interp-fallback steps,
+     * where the shadow is re-synced from the real cpu rather than
+     * stepped, so interactive programs verify too: every console byte
+     * is consumed once, every disk operation happens once. */
     if (dbt->verify && !dbt->shadow_mem) {
         dbt->shadow_mem = calloc(1, 65536);
         if (!dbt->shadow_mem) {
@@ -199,6 +192,7 @@ int dbt_run(z80_dbt_t *dbt) {
         dbt->shadow_cpu = *cpu;
         dbt->shadow_cpu.mem = dbt->shadow_mem;
         dbt->shadow_cpu.dbt = NULL;       /* shadow must not recurse into JIT */
+        dbt->shadow_cpu.defer_traps = 1;  /* stop AT a trap, like a block does */
     }
 
     for (;;) {
@@ -339,11 +333,18 @@ int dbt_run(z80_dbt_t *dbt) {
             return 0;   /* clean CP/M exit */
         }
         if (dbt->verify) {
-            /* Keep the shadow in lockstep on the interp-fallback path too —
-             * the real cpu just advanced via z80_step, so the shadow must
-             * advance the same one step. */
-            int srx = z80_step(&dbt->shadow_cpu);
-            (void)srx;
+            /* The fallback instruction ran on the reference interpreter,
+             * so there is nothing to verify about it — and it may have
+             * been a host service (BDOS/BIOS trap, port I/O) whose side
+             * effects (console bytes consumed, disk data landed in guest
+             * memory) must not happen twice. Re-sync the shadow from the
+             * real cpu instead of stepping it; lockstep resumes at the
+             * next translated block. */
+            dbt->shadow_cpu = *cpu;
+            dbt->shadow_cpu.mem = dbt->shadow_mem;
+            dbt->shadow_cpu.dbt = NULL;
+            dbt->shadow_cpu.defer_traps = 1;
+            memcpy(dbt->shadow_mem, cpu->mem, 65536);
         }
     }
 }

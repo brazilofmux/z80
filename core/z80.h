@@ -121,6 +121,13 @@ typedef struct z80_cpu {
     volatile uint8_t host_event;
     void (*on_host_event)(struct z80_cpu *cpu);
 
+    /* When set, the interpreter does not service a BDOS/BIOS/warm-boot
+     * trap it jumps onto: the step ends with PC at the trap address and
+     * the caller dispatches. That is the JIT's model (blocks end at a
+     * trap target; dbt_run traps it), so the -V shadow runs with it set
+     * and stays comparable to translated code. */
+    uint8_t  defer_traps;
+
     /* Port I/O hooks. `high` is the top address byte the Z80 puts on
      * A8-A15: B for the (C) forms, A for IN A,(n) / OUT (n),A. NULL
      * means an unconnected bus: IN reads 0xFF, OUT is dropped. Only the
@@ -343,5 +350,12 @@ uint8_t z80_materialize_flags(z80_cpu_t *cpu);
  * it is, a 16-bit address-masked invalidation fires for hits in the
  * code bitmap. ALL interp memory writes must route through here. */
 void z80_mem_w(z80_cpu_t *cpu, uint16_t addr, uint8_t val);
+
+/* The host wrote guest memory directly (BDOS read into the DMA buffer,
+ * directory entries, the line editor's buffer): run the same SMC
+ * invalidation a guest store would have, for every byte in the range.
+ * Overlay loaders reuse code addresses, and a translated block for the
+ * old code must not survive the new bytes landing under it. */
+void z80_mem_host_wrote(z80_cpu_t *cpu, uint16_t addr, uint32_t len);
 
 #endif /* Z80_H */

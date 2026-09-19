@@ -44,9 +44,10 @@ proves them wrong):
   shadow CPUs both execute the console BDOS calls and consume keystrokes
   alternately (see the note in `dbt_run`).
 - Software on hand (all in `disks/`, git-ignored): zexdoc/zexall,
-  MS-COBOL 4.65, Zork 1, WordStar 3.00 (installed for a Visual 200 —
-  needs INSTALL for ADM-3A), dBASE II 2.41 (needs INSTALL), Turbo Pascal
-  3.00A (already installed "Kaypro with hilite"), MBASIC 5.2x, BBC
+  MS-COBOL 4.65, Zork 1, WordStar 3.00 (INSTALLed for ADM-3A: creates,
+  edits and saves documents under the shim), dBASE II 2.41 (INSTALLed
+  for Kaypro II: reaches its dot prompt), Turbo Pascal 3.00A (already
+  installed "Kaypro with hilite": reaches its menu), MBASIC 5.2x, BBC
   BASIC, M80/L80. No CP/M system files yet — see *Sourcing*.
 
 ## Phase 0 — core prerequisites
@@ -170,14 +171,28 @@ the Phase 2 BIOS both feed it.
   `--screen-dump <file>` writes the 25×80 text on exit. **Done**
   (`kaypro/kaypro_kbd.c`, which is now the single input path for CONST/
   CONIN/HALT, host terminal or script, with the idle-poll sleep).
-- `tests/screen/`: small `.COM`s that draw with each escape, plus
-  expected dumps. Later, WordStar smoke tests: open a file, type,
-  search/replace, save, compare the dump and the saved file.
-- Make `-V` usable interactively: console input goes through a
-  record/replay layer so the shadow CPU replays what the real CPU
-  consumed instead of reading the host again. Output from the shadow
-  is discarded. This is the same lockstep story extended to the
-  machine, and it is what lets us claim WordStar runs verified.
+- `tests/scripts/` + `tests/wordstar.sh` / `tests/zork.sh` (`make
+  test-apps`, skipped when the software is absent): WordStar creates a
+  document, types, saves; the editor status line, the No-File menu
+  afterwards and the host file's bytes are checked. **Done.** Still to
+  come: `.COM`s that draw with each escape, and search/replace.
+- Make `-V` usable interactively. **Done**, and more simply than
+  record/replay: a host service (BDOS/BIOS trap, port I/O) is an
+  interpreter-fallback step, and after one the shadow is re-synced from
+  the real CPU instead of stepped, so every console byte is consumed
+  once and every disk operation happens once. The shadow runs with
+  `defer_traps` so it stops *at* a trap address the way a translated
+  block does. `Z80_VERIFY_STRICT=1` makes every block return to the
+  dispatcher (no links, no inline probe) so a divergence is localised
+  to one block — that is how the overlay bug below was found in
+  minutes. The WordStar edit-and-save session verifies clean.
+- **Host writes must invalidate translated code.** BDOS reads land in
+  the DMA buffer behind the JIT's store check; WordStar reloads overlay
+  segments into the same addresses, and a translated block for the old
+  overlay survived — `z80_mem_host_wrote()` now runs the SMC
+  invalidation for every host write into guest memory (disk reads,
+  directory entries, the line editor). The real BIOS in Phase 2 will
+  write sectors the same way and needs the same call.
 
 Acceptance: a `.COM` exercising every escape produces the expected
 dump; Zork plays in the cell-buffer terminal with the HUD live;
