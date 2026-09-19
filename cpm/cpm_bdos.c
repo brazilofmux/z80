@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <termios.h>
+#include <stdlib.h>
 
 int cpm_debug = 0;
 
@@ -13,9 +14,17 @@ int cpm_debug = 0;
 int cpm_bdos_dispatch(z80_cpu_t *cpu) {
     uint8_t func = cpu->c;
 
-    /* Light startup logging to help bring-up of real binaries (first ~30 calls) */
+    /* Light startup logging to help bring-up of real binaries: the first
+     * 30 calls plus every open/make/delete, or every call up to
+     * Z80_BDOS_TRACE_MAX (0 = no limit) when that is set. */
     static int early_calls = 0;
-    if (cpm_debug && (early_calls < 30 || func == 15 || func == 22 || func == 19)) {
+    static long trace_max = -1;
+    if (trace_max < 0) {
+        const char *e = getenv("Z80_BDOS_TRACE_MAX");
+        trace_max = e ? atol(e) : 30;
+        if (trace_max == 0) trace_max = 1L << 30;
+    }
+    if (cpm_debug && (early_calls < trace_max || func == 15 || func == 22 || func == 19)) {
         early_calls++;
         if (func == 33 || func == 34) {
             /* Dump the random record the game is asking for */
@@ -32,10 +41,18 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
             name[j++] = '.';
             for (int i = 9; i < 12 && fcb[i] != ' '; i++) name[j++] = fcb[i];
             name[j] = 0;
-            fprintf(stderr, "[BDOS #%d] func=%d (%s) FCB@%04X drive=%d name='%s'\n",
+            fprintf(stderr, "[BDOS #%d] func=%d (%s) FCB@%04X drive=%d name='%s' EX=%02X S2=%02X CR=%02X raw=",
                     early_calls, func,
                     func == 15 ? "OPEN" : func == 22 ? "MAKE" : func == 19 ? "DEL" : "SFIRST",
-                    cpu->de, fcb[0], name);
+                    cpu->de, fcb[0], name, fcb[12], fcb[14], fcb[32]);
+            for (int i = 1; i < 12; i++) fprintf(stderr, "%02X", fcb[i]);
+            fputc('\n', stderr);
+        } else if (func == 20 || func == 21) {
+            /* Sequential I/O: the FCB's own position fields drive it. */
+            uint8_t *fcb = &cpu->mem[cpu->de];
+            fprintf(stderr, "[BDOS #%d] func=%d (%s) FCB@%04X EX=%02X S1=%02X S2=%02X RC=%02X CR=%02X\n",
+                    early_calls, func, func == 20 ? "READ" : "WRITE", cpu->de,
+                    fcb[12], fcb[13], fcb[14], fcb[15], fcb[32]);
         } else {
             fprintf(stderr, "[BDOS #%d] func=%d DE=%04X\n", early_calls, func, cpu->de);
         }

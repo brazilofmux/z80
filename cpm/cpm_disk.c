@@ -48,6 +48,20 @@ static char a_root[PATH_MAX] = {0};
  */
 static DIR *search_dir = NULL;
 static char search_pattern[16];   /* 8.3 pattern from FCB */
+static uint8_t search_fcb[CPM_FCB_SIZE]; /* the FCB SFIRST was given; SNEXT matches against it */
+
+/* The record a sequential access reads or writes comes from the FCB
+ * itself — extent (EX, 5 bits), S2 (extent high bits) and CR — because
+ * CP/M programs seek by writing those fields directly and calling READ
+ * again. WordStar positions inside its overlays that way. */
+static uint32_t fcb_record_pos(const uint8_t *fcb) {
+    return ((uint32_t)(fcb[14] & 0x0F) << 12) | ((uint32_t)(fcb[12] & 0x1F) << 7) | (fcb[32] & 0x7F);
+}
+static void fcb_set_record_pos(uint8_t *fcb, uint32_t rec) {
+    fcb[32] = (uint8_t)(rec & 0x7F);
+    fcb[12] = (uint8_t)((rec >> 7) & 0x1F);
+    fcb[14] = (uint8_t)((rec >> 12) & 0x0F);
+}
 
 /* ------------------------------------------------------------------ */
 
@@ -97,11 +111,6 @@ static int alloc_file_slot(void)
     return -1;
 }
 
-/* Compute host file offset from logical 128-byte record number */
-static long logical_record_to_offset(uint16_t rec)
-{
-    return (long)rec * 128;
-}
 
 /* Look up open slot by the guest FCB address (the value passed in DE to the BDOS call).
  * This is much more compatible than abusing the drive byte in the FCB.
@@ -233,15 +242,15 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
     uint8_t rc = 0;
     if (fstat(fileno(fp), &st) == 0) {
         long total_recs = (st.st_size + 127L) / 128L;
-        if (total_recs > 0x80) total_recs = 0x80; /* one extent max for simple case */
-        rc = (uint8_t)total_recs;
+        long in_extent = total_recs - (long)(fcb_record_pos(fcb) & ~0x7Fu);
+        if (in_extent < 0) in_extent = 0;
+        if (in_extent > 0x80) in_extent = 0x80;   /* RC counts records in THIS extent */
+        rc = (uint8_t)in_extent;
     }
     fcb[15] = rc;
 
     /* Initialize logical record from FCB (program may have set extent/CR) */
-    uint8_t extent = fcb[12];
-    uint8_t cr     = fcb[32];
-    open_files[slot].logical_record = ((uint16_t)extent << 7) + cr;
+    open_files[slot].logical_record = (uint16_t)fcb_record_pos(fcb);
 
     cpu->a = 0;
     /* Do NOT smash fcb[0] — leave the original drive code alone.
@@ -274,9 +283,9 @@ int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
     }
 
     FILE *fp = open_files[slot].fp;
-    uint16_t rec = open_files[slot].logical_record;
+    uint32_t rec = fcb_record_pos(fcb);
 
-    long offset = logical_record_to_offset(rec);
+    long offset = (long)rec * 128;
 
     if (fseek(fp, offset, SEEK_SET) != 0) {
         cpu->a = 1;
@@ -293,11 +302,9 @@ int cpm_bdos_read_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
     }
 
     /* Advance */
-    open_files[slot].logical_record = rec + 1;
+    open_files[slot].logical_record = (uint16_t)(rec + 1);
 
-    /* Update FCB for the caller */
-    fcb[12] = (rec + 1) >> 7;     /* new extent */
-    fcb[32] = (rec + 1) & 0x7F;   /* new CR */
+    fcb_set_record_pos(fcb, rec + 1);
 
     cpu->a = 0;
     return 1;
@@ -313,9 +320,9 @@ int cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
     }
 
     FILE *fp = open_files[slot].fp;
-    uint16_t rec = open_files[slot].logical_record;
+    uint32_t rec = fcb_record_pos(fcb);
 
-    long offset = logical_record_to_offset(rec);
+    long offset = (long)rec * 128;
 
     if (fseek(fp, offset, SEEK_SET) != 0) {
         cpu->a = 1;
@@ -332,12 +339,10 @@ int cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr)
     }
 
     /* Advance and flush */
-    open_files[slot].logical_record = rec + 1;
+    open_files[slot].logical_record = (uint16_t)(rec + 1);
     fflush(fp);
 
-    /* Update FCB */
-    fcb[12] = (rec + 1) >> 7;
-    fcb[32] = (rec + 1) & 0x7F;
+    fcb_set_record_pos(fcb, rec + 1);
 
     /* Update record count in current extent (crude but helpful) */
     if (fcb[15] < 0x80) fcb[15]++;
@@ -393,8 +398,7 @@ int cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr)
     }
 
     /* Update sequential position so mixed seq/random works */
-    fcb[12] = rec >> 7;      /* extent */
-    fcb[32] = rec & 0x7F;    /* current record */
+    fcb_set_record_pos(fcb, rec);
 
     open_files[slot].logical_record = rec;
 
@@ -433,8 +437,7 @@ int cpm_bdos_random_write(z80_cpu_t *cpu, uint16_t fcb_addr)
     fflush(fp);
 
     /* Update sequential fields */
-    fcb[12] = rec >> 7;
-    fcb[32] = rec & 0x7F;
+    fcb_set_record_pos(fcb, rec);
 
     open_files[slot].logical_record = rec;
 
@@ -588,6 +591,7 @@ int cpm_bdos_search_first(z80_cpu_t *cpu, uint16_t fcb_addr)
 
     fcb_to_host_name(fcb, pattern, sizeof(pattern));
     strncpy(search_pattern, pattern, sizeof(search_pattern));
+    memcpy(search_fcb, fcb, CPM_FCB_SIZE);
 
     {
         char dirpath[PATH_MAX];
@@ -632,9 +636,8 @@ int cpm_bdos_search_next(z80_cpu_t *cpu)
         struct stat st;
         if (stat(ent->d_name, &st) != 0 || !S_ISREG(st.st_mode)) continue;
 
-        /* Loose but useful matching against the stored pattern */
-        if (search_pattern[0] == '*' || strcasestr(ent->d_name, search_pattern)) {
-            fill_dir_entry(&cpu->mem[current_dma], ent->d_name, 0);
+        if (fcb_name_matches(search_fcb, ent->d_name)) {
+            fill_dir_entry(&cpu->mem[current_dma], ent->d_name, search_fcb[0]);
             cpu->a = 0;
             return 1;
         }
