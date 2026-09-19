@@ -342,8 +342,13 @@ by shape with its three immediates as parameters: **4.8 BIPS**. What
 remains is a long diffuse tail: WordStar's display refresh, the DRI BDOS, line
 management. `Z80_PROFILE=1 -i` and `-d`'s `[fold]` lines are the tools.
 The whole replace session verifies under strict -V; zexdoc -V still
-passes. x86-64 needs the three translator additions (ports, countdown,
-copy/fill) mirrored.
+passes. x86-64 has the same three (ports, countdown, copy/fill):
+1.62 BIPS on the Xeon VM with no fallbacks (1.31 with ports trapping),
+all app tests under strict -V. Porting found that the folded JR-form
+copy loop left memptr = pc where the silicon leaves the last
+iteration's `LD (DE),A` / `LD A,(DE)` value (the final, not-taken JR
+writes nothing); fixed in the shared helper, and tests/loop.com now
+ends a block right after that loop so -V sees it.
 
 - WordStar 3.3 with the Kaypro terminal definition (or WS 4 installed
   for Kaypro), dBASE II 2.41, Turbo Pascal 3.0 (has a Kaypro install),

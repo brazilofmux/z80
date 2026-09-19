@@ -48,6 +48,10 @@ int main(void) {
     b(0x32); w(RES + 8);                                           /* A = last byte copied */
     b(0x21); w(DST + 8); b(0x11); w(SRC); b(0x06); b(0);           /* (DE)=SRC -> (HL)=DST+8, 256 bytes, B=0 */
     int l6 = p; b(0x1A); b(0x77); b(0x13); b(0x23); b(0x05); b(0x20); b((uint8_t)(l6 - (p + 1)));  /* LD A,(DE); LD (HL),A; INC DE; INC HL; DEC B; JR NZ */
+    /* End the block right here with nothing that writes memptr (PUSH,
+     * LD HL,nn and JP (HL) leave it alone), so -V compares the memptr
+     * the folded loop left against the interpreter's. */
+    b(0xE5); b(0x21); w(ORG + p + 3); b(0xE9); b(0xE1);            /* PUSH HL; LD HL,next; JP (HL); next: POP HL */
     /* HL should be DST+8+256: store L and H */
     b(0x7D); b(0x32); w(RES + 9); b(0x7C); b(0x32); w(RES + 10);
     /* Fill loop: 3 bytes of 0x55 at DST+0x180 counted in E. */

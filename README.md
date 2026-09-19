@@ -36,7 +36,7 @@ Single core, JIT unless noted:
 | MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** | **3.15 BIPS** | **1.82 BIPS** | **532 MIPS** |
 | zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** | **0.17 BIPS** | **1.3 BIPS** | **0.47 BIPS** |
 | Same workloads, reference interpreter | ~230 MIPS | — | ~70 MIPS | ~24 MIPS |
-| WordStar 3.00 global search-and-replace over a 50-page document, native CP/M 2.2 (`bench/wsreplace.sh`, 293M insns) | **4.8 BIPS** | | | |
+| WordStar 3.00 global search-and-replace over a 50-page document, native CP/M 2.2 (`bench/wsreplace.sh`, 293M insns) | **4.8 BIPS** | | **1.62 BIPS** | |
 
 The Pi 4 (Cortex-A72 @ 1.5 GHz, Debian 11, GCC 10, Linux/aarch64) built from a clean clone with no source changes; zexdoc and zexall pass 67/67 under the JIT, and the full zexdoc run passes under `-V` lockstep verification in six minutes. No Mac required.
 

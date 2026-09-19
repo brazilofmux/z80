@@ -162,6 +162,12 @@ static int s_use_ras = -1;
  * the first translation (dbt->verify is set after dbt_init). */
 static int s_strict_exit = -1;
 
+/* IN A,(n) / OUT (n),A as direct helper calls instead of interpreter
+ * traps — a native CP/M system's BIOS lives on them. Off under -V (the
+ * shadow would perform the I/O again; the fallback re-sync is what keeps
+ * lockstep exact); Z80_NO_INLINE_PORTS=1 for A/B. */
+static int s_inline_ports = -1;
+
 /* Guest CALLs between forced unwinds: bounds host-stack growth from
  * CALLs that never RET (16 bytes each) to RAS_CALL_BUDGET * 16 bytes. */
 #define RAS_CALL_BUDGET (32u * 1024u)
@@ -1068,6 +1074,10 @@ static int can_translate(const z80_decoded *dec, uint16_t pc_after) {
     case Z80_OP_LDDR:
         return 1;
 
+    case Z80_OP_IN_A_N:
+    case Z80_OP_OUT_N_A:
+        return !idx && s_inline_ports > 0;
+
     case Z80_OP_PUSH_RR:
     case Z80_OP_POP_RR:
         if (dec->reg1 <= 2) return 1;
@@ -1677,6 +1687,39 @@ static unsigned emit_op(emit_t *e, const z80_decoded *dec, uint16_t pc_after,
         return OP_SETS_F_INLINE;
     }
 
+    case Z80_OP_OUT_N_A:
+    case Z80_OP_IN_A_N: {
+        /* Direct helper call (see s_inline_ports). The pending count is
+         * flushed first: a helper may end the run (CONIN at the end of a
+         * script, the exit port) and the stats read cpu->insn_count.
+         * emit_call_helper pushes/pops the caller-saved pinned registers
+         * (A, F, SP, count) around the call; the return value in RAX
+         * survives the pops.
+         *   OUT (n),A : port_out(cpu, n, A, A); memptr = (A<<8)|((n+1)&FF)
+         *   IN  A,(n) : memptr = ((A<<8)|n)+1 with the OLD A; A = port_in(cpu, n, A) */
+        emit_add_m64_r64(e, R_CPU, X64_NOREG, OFF_INSN_COUNT, R_CNT);
+        emit_alu_r32_r32(e, X64_ALU_XOR, R_CNT, R_CNT);
+        if (dec->type == Z80_OP_OUT_N_A) {
+            if (store_memptr) emit_set_memptr_quirk_imm(e, (uint8_t)((dec->imm8 + 1) & 0xFF));
+            /* args: rdi=cpu (set by the wrapper), esi=port, edx=high(A), ecx=val(A) */
+            emit_mov_r32_imm32(e, T1, dec->imm8);
+            emit_mov_r32_r32(e, R_F, R_A);           /* edx = A; F is restored by the pop */
+            emit_call_helper(e, (void *)(uintptr_t)z80_jit_port_out);
+        } else {
+            if (store_memptr) {
+                emit_mov_r32_r32(e, T0, R_A);
+                emit_shl_r32_imm(e, T0, 8);
+                emit_alu_r32_imm(e, X64_ALU_ADD, T0, (int32_t)(dec->imm8 + 1));
+                emit_mov_m16_r16(e, R_CPU, X64_NOREG, OFF_MEMPTR, T0);
+            }
+            emit_mov_r32_imm32(e, T1, dec->imm8);
+            emit_mov_r32_r32(e, R_F, R_A);           /* edx = high = A */
+            emit_call_helper(e, (void *)(uintptr_t)z80_jit_port_in);
+            emit_movzx_r32_r8(e, R_A, T0);           /* A = returned byte */
+        }
+        return OP_FALL_THROUGH;
+    }
+
     case Z80_OP_LDIR:
     case Z80_OP_LDDR: {
         /* Helper does the entire block copy, updates HL/DE/BC/F, and
@@ -1817,6 +1860,8 @@ static void op_flag_effects(const z80_decoded *dec, uint8_t *rd, uint8_t *wr) {
 enum { MPTR_NONE = 0, MPTR_WRITE, MPTR_WRITE_FIXED, MPTR_READ };
 static int op_memptr_effect(const z80_decoded *dec) {
     switch (dec->type) {
+    case Z80_OP_IN_A_N: case Z80_OP_OUT_N_A:
+        return MPTR_WRITE;
     case Z80_OP_LD_A_BC: case Z80_OP_LD_A_DE:
     case Z80_OP_LD_BC_A: case Z80_OP_LD_DE_A:
     case Z80_OP_LD_A_NN: case Z80_OP_LD_NN_A:
@@ -1965,9 +2010,127 @@ static void emit_branch_ender(z80_dbt_t *dbt, emit_t *e,
     }
 }
 
+/* ----------------------------------------------------------------------
+ * Loops in closed form — the same three shapes dbt_a64.c folds; see the
+ * discussion there. countdown_kind / copyfill_kind are the AArch64
+ * matchers verbatim (they only look at decoded ops); the emitters are
+ * this backend's.
+ *
+ *   DEC r ; JP NZ,<the DEC>      DEC r ; JR NZ,<the DEC>      DJNZ $
+ *   LD A,(HL); LD (DE),A; INC HL; INC DE; DEC r; JP/JR NZ,start  (+ mirror)
+ *   LD (HL),A; INC HL; DEC r; JP/JR NZ,start
+ * ---------------------------------------------------------------------- */
+enum { FUSE_NONE = 0, FUSE_DEC_JP, FUSE_DEC_JR, FUSE_DJNZ };
+
+static int countdown_kind(const z80_decoded *decs, const uint16_t *pc_afters,
+                          uint32_t i, uint32_t n_ops) {
+    const z80_decoded *d = &decs[i];
+    uint16_t pc_i = (uint16_t)(pc_afters[i] - d->bytes);
+    if (d->prefix == 0xDD || d->prefix == 0xFD) return FUSE_NONE;
+    if (d->type == Z80_OP_DJNZ)
+        return (uint16_t)(pc_afters[i] + (int16_t)d->disp) == pc_i ? FUSE_DJNZ : FUSE_NONE;
+    if (d->type != Z80_OP_DEC_R || d->reg1 == 6 || i + 1 >= n_ops) return FUSE_NONE;
+    const z80_decoded *j = &decs[i + 1];
+    if (j->prefix == 0xDD || j->prefix == 0xFD || j->cc != 0) return FUSE_NONE;   /* cc 0 = NZ */
+    if (j->type == Z80_OP_JP_CC_NN && j->imm16 == pc_i) return FUSE_DEC_JP;
+    if (j->type == Z80_OP_JR_CC_E &&
+        (uint16_t)(pc_afters[i + 1] + (int16_t)j->disp) == pc_i) return FUSE_DEC_JR;
+    return FUSE_NONE;
+}
+
+static int copyfill_kind(const z80_decoded *decs, const uint16_t *pc_afters,
+                         uint32_t i, uint32_t n_ops, uint32_t *spec, int *is_fill) {
+    uint16_t pc_i = (uint16_t)(pc_afters[i] - decs[i].bytes);
+    const z80_decoded *d = &decs[i];
+    for (uint32_t k = i; k < n_ops && k < i + 6; k++)
+        if (decs[k].prefix == 0xDD || decs[k].prefix == 0xFD) return 0;
+    int dir = -1, len = 0;
+    if (d->type == Z80_OP_LD_R_R && d->reg1 == 7 && d->reg2 == 6 &&
+        i + 5 < n_ops && decs[i + 1].type == Z80_OP_LD_DE_A) { dir = 0; len = 6; }
+    else if (d->type == Z80_OP_LD_A_DE && i + 5 < n_ops &&
+             decs[i + 1].type == Z80_OP_LD_R_R && decs[i + 1].reg1 == 6 && decs[i + 1].reg2 == 7) { dir = 1; len = 6; }
+    else if (d->type == Z80_OP_LD_R_R && d->reg1 == 6 && d->reg2 == 7 && i + 3 < n_ops) { len = 4; }
+    else return 0;
+    uint32_t j = i + (len == 6 ? 2 : 1);
+    if (len == 6) {
+        const z80_decoded *a = &decs[j], *b = &decs[j + 1];
+        int hl_de = a->type == Z80_OP_INC_RR && a->reg1 == 2 && b->type == Z80_OP_INC_RR && b->reg1 == 1;
+        int de_hl = a->type == Z80_OP_INC_RR && a->reg1 == 1 && b->type == Z80_OP_INC_RR && b->reg1 == 2;
+        if (!hl_de && !de_hl) return 0;
+        j += 2;
+    } else {
+        if (!(decs[j].type == Z80_OP_INC_RR && decs[j].reg1 == 2)) return 0;
+        j += 1;
+    }
+    const z80_decoded *dec = &decs[j];
+    if (dec->type != Z80_OP_DEC_R) return 0;
+    if (len == 6 ? (dec->reg1 > 1) : (dec->reg1 > 3)) return 0;
+    const z80_decoded *br = &decs[j + 1];
+    int cond = 0;
+    if (br->cc != 0) return 0;
+    if (br->type == Z80_OP_JP_CC_NN) { if (br->imm16 != pc_i) return 0; }
+    else if (br->type == Z80_OP_JR_CC_E) { if ((uint16_t)(pc_afters[j + 1] + (int16_t)br->disp) != pc_i) return 0; cond = 1; }
+    else return 0;
+    *spec = (uint32_t)dec->reg1 | ((uint32_t)(dir > 0) << 8) | ((uint32_t)cond << 9);
+    *is_fill = (len == 4);
+    return len;
+}
+
+/* The copy/fill helpers read BC/DE/HL/A/F from the context and write
+ * them back — sync both ways, like LDIR. Args: (cpu, spec, pc). */
+static void emit_copyfill(emit_t *e, int is_fill, uint32_t spec, uint16_t loop_pc) {
+    emit_mov_m16_r16(e, R_CPU, X64_NOREG, OFF_BC, R_BC);
+    emit_mov_m16_r16(e, R_CPU, X64_NOREG, OFF_DE, R_DE);
+    emit_mov_m16_r16(e, R_CPU, X64_NOREG, OFF_HL, R_HL);
+    emit_mov_m8_r8  (e, R_CPU, X64_NOREG, OFF_A,  R_A);
+    emit_mov_m8_r8  (e, R_CPU, X64_NOREG, OFF_F,  R_F);
+    emit_mov_r32_imm32(e, T1, spec);
+    emit_mov_r32_imm32(e, R_F, loop_pc);         /* edx = pc; F reloaded below */
+    emit_call_helper(e, is_fill ? (void *)(uintptr_t)z80_jit_loop_fill
+                                : (void *)(uintptr_t)z80_jit_loop_copy);
+    emit_movzx_r32_m16(e, R_BC, R_CPU, X64_NOREG, OFF_BC);
+    emit_movzx_r32_m16(e, R_DE, R_CPU, X64_NOREG, OFF_DE);
+    emit_movzx_r32_m16(e, R_HL, R_CPU, X64_NOREG, OFF_HL);
+    emit_movzx_r32_m8 (e, R_A,  R_CPU, X64_NOREG, OFF_A);
+    emit_movzx_r32_m8 (e, R_F,  R_CPU, X64_NOREG, OFF_F);
+}
+
+/* Countdown in closed form: r = 0, skipped instructions added to the
+ * pending count (2 per extra iteration for DEC+branch, 1 for DJNZ),
+ * F = (F & C) | FT_DEC[0] for the DEC forms, memptr per the branch. */
+static void emit_countdown(emit_t *e, int kind, int reg, uint16_t loop_pc) {
+    int v = emit_read_r8(e, T1, reg, 0);              /* r, canonical */
+    emit_lea_r32(e, T0, v, X64_NOREG, -1);
+    emit_movzx_r32_r8(e, T0, T0);                     /* eax = iterations - 1 */
+    if (kind == FUSE_DJNZ) {
+        emit_alu_r64_r64(e, X64_ALU_ADD, R_CNT, T0);
+    } else {
+        emit_lea_r32(e, T2, T0, T0, 0);               /* edi = 2 * (iterations - 1) */
+        emit_alu_r64_r64(e, X64_ALU_ADD, R_CNT, T2);
+    }
+    emit_write_r8_imm(e, reg, 0, 0);
+    if (kind != FUSE_DJNZ) {
+        emit_alu_r32_imm(e, X64_ALU_AND, R_F, Z80_FLAG_C);
+        emit_movzx_r32_m8(e, T1, R_AUX, X64_NOREG, FT_DEC + 0);
+        emit_alu_r32_r32(e, X64_ALU_OR, R_F, T1);
+    }
+    if (kind == FUSE_DEC_JP) {
+        emit_set_memptr_imm(e, loop_pc);
+    } else {
+        /* memptr = loop_pc if the branch was taken at least once */
+        emit_movzx_r32_m16(e, T2, R_CPU, X64_NOREG, OFF_MEMPTR);
+        emit_mov_r32_imm32(e, T1, loop_pc);
+        emit_test_r32_r32(e, T0, T0);
+        emit_cmovcc_r32_r32(e, X64_CC_Z, T1, T2);
+        emit_mov_m16_r16(e, R_CPU, X64_NOREG, OFF_MEMPTR, T1);
+    }
+}
+
 uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     if (s_strict_exit < 0)
         s_strict_exit = dbt->verify && getenv("Z80_VERIFY_STRICT") != NULL;
+    if (s_inline_ports < 0)
+        s_inline_ports = !dbt->verify && getenv("Z80_NO_INLINE_PORTS") == NULL;
     if (dbt->code_used + 65536 > CODE_BUF_SIZE) {
         /* Out of JIT space — blow away the cache and reset the cursor. */
         dbt_cache_invalidate_all(dbt);
@@ -2049,6 +2212,32 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
 
     for (uint32_t i = 0; i < n_ops; i++) {
         const z80_decoded *dec = &decs[i];
+
+        {
+            uint32_t spec; int is_fill;
+            int len = copyfill_kind(decs, pc_afters, i, n_ops, &spec, &is_fill);
+            if (len) {
+                dbt->loops_folded++;
+                if (cpm_debug) fprintf(stderr, "[fold] %s loop at %04X (counter %u)\n",
+                                       is_fill ? "fill" : "copy", (uint16_t)(pc_afters[i] - dec->bytes), spec & 7);
+                emit_copyfill(&e, is_fill, spec, (uint16_t)(pc_afters[i] - dec->bytes));
+                q_mode = Q_CLEAR;
+                prev_q = 0;
+                i += (uint32_t)len - 1;
+                continue;
+            }
+        }
+        int fuse = countdown_kind(decs, pc_afters, i, n_ops);
+        if (fuse != FUSE_NONE) {
+            dbt->loops_folded++;
+            if (cpm_debug) fprintf(stderr, "[fold] countdown loop at %04X\n", (uint16_t)(pc_afters[i] - dec->bytes));
+            emit_countdown(&e, fuse, fuse == FUSE_DJNZ ? 0 : dec->reg1,
+                           (uint16_t)(pc_afters[i] - dec->bytes));
+            q_mode = Q_CLEAR;
+            prev_q = 0;
+            if (fuse != FUSE_DJNZ) i++;          /* the branch is consumed */
+            continue;
+        }
 
         if (is_uncond_ender(dec->type) ||
             (is_cond_ender(dec->type) && i == n_ops - 1)) {

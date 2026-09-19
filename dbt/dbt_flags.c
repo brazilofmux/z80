@@ -458,10 +458,9 @@ static uint8_t *counter_reg(z80_cpu_t *cpu, unsigned code) {
     }
 }
 
-static void loop_epilogue(z80_cpu_t *cpu, uint8_t *cnt, uint32_t n, uint32_t spec, uint16_t pc) {
+static void loop_epilogue(z80_cpu_t *cpu, uint8_t *cnt) {
     *cnt = 0;
     cpu->f = (uint8_t)((cpu->f & Z80_FLAG_C) | z80_f_tables[FT_DEC + 0]);  /* the last DEC: 1 -> 0 */
-    if (!(spec & 0x200) || n >= 2) cpu->memptr = pc;
     cpu->q = 0;                                  /* the branch was the last instruction */
 }
 
@@ -476,11 +475,22 @@ void z80_jit_loop_copy(z80_cpu_t *cpu, uint32_t spec, uint16_t pc) {
         last = cpu->mem[(uint16_t)(src + i)];
         cpu->mem[(uint16_t)(dst + i)] = last;
     }
+    uint16_t de_last = (uint16_t)(cpu->de + n - 1);   /* DE at the last iteration's LD */
     cpu->hl = (uint16_t)(cpu->hl + n);
     cpu->de = (uint16_t)(cpu->de + n);
     cpu->a = last;
     cpu->insn_count += 6ull * (n - 1);
-    loop_epilogue(cpu, cnt, n, spec, pc);
+    loop_epilogue(cpu, cnt);
+    /* memptr: JP cc,nn writes nn on both paths, so the JP form ends with
+     * pc. The JR form's final, not-taken branch writes nothing, so what
+     * remains is the last iteration's LD — LD (DE),A leaves
+     * (A << 8) | ((DE + 1) & 0xFF), LD A,(DE) leaves DE + 1. */
+    if (!(spec & 0x200))
+        cpu->memptr = pc;
+    else if (dir)
+        cpu->memptr = (uint16_t)(de_last + 1);
+    else
+        cpu->memptr = (uint16_t)(((uint16_t)last << 8) | ((de_last + 1) & 0xFF));
     smc_sweep_forward(cpu, dst, n);
 }
 
@@ -492,7 +502,10 @@ void z80_jit_loop_fill(z80_cpu_t *cpu, uint32_t spec, uint16_t pc) {
     for (uint32_t i = 0; i < n; i++) cpu->mem[(uint16_t)(dst + i)] = cpu->a;
     cpu->hl = (uint16_t)(cpu->hl + n);
     cpu->insn_count += 4ull * (n - 1);
-    loop_epilogue(cpu, cnt, n, spec, pc);
+    loop_epilogue(cpu, cnt);
+    /* The body never touches memptr: JP form -> pc; JR form -> pc only
+     * if the branch was ever taken. */
+    if (!(spec & 0x200) || n >= 2) cpu->memptr = pc;
     smc_sweep_forward(cpu, dst, n);
 }
 
