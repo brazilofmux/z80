@@ -28,7 +28,7 @@ endif
 
 # Core sources (will grow)
 CORE_SRCS = core/z80_decode.c core/z80_interp.c core/z80_state.c
-CPM_SRCS  = cpm/cpm_bdos.c cpm/cpm_bios.c cpm/cpm_loader.c cpm/cpm_disk.c cpm/cpm_ports.c
+CPM_SRCS  = cpm/cpm_bdos.c cpm/cpm_bios.c cpm/cpm_loader.c cpm/cpm_disk.c cpm/cpm_ports.c cpm/cpm_host.c
 KAYPRO_SRCS = kaypro/kaypro_video.c kaypro/kaypro_render_tty.c kaypro/kaypro_kbd.c
 
 # DBT sources
@@ -90,7 +90,8 @@ test-guest: $(TARGET) $(GUEST_TESTS)
 
 # Headless application smoke tests (skip when the software is not in disks/).
 .PHONY: test-apps
-test-apps: $(TARGET)
+test-apps: $(TARGET) tools/mkdsk tests/hello.com tests/block.com
+	@tests/cpm22.sh jit
 	@tests/zork.sh jit
 	@tests/wordstar.sh jit
 	@tests/dbase.sh jit
@@ -115,6 +116,29 @@ tests/render_test: tests/render_test.c kaypro/kaypro_render_tty.c kaypro/kaypro_
 	$(CC) $(CFLAGS) -o $@ tests/render_test.c kaypro/kaypro_render_tty.c kaypro/kaypro_video.c
 test-render: tests/render_test
 	./tests/render_test
+
+# Disk image tool (tools/mkdsk.c): make, fill, list, extract z80m images.
+tools/mkdsk: tools/mkdsk.c
+	$(CC) $(CFLAGS) -o $@ tools/mkdsk.c
+
+# The CP/M 2.2 system image: DRI's CCP (DC00) and BDOS (E400) plus our
+# BIOS (F200), assembled with Macro Assembler AS (tools/get-asl.sh
+# builds it into tools/asl/). cpm/cpm22/system.bin is checked in, so a
+# clone boots without the assembler; `make system` rebuilds it.
+ASL   = tools/asl/asl
+P2BIN = tools/asl/p2bin
+.PHONY: system
+system: cpm/cpm22/system.bin
+cpm/cpm22/system.bin: cpm/cpm22/ccp.asm cpm/cpm22/bdos.asm cpm/cpm22/bios.asm
+	@test -x $(ASL) || { echo "need $(ASL): run tools/get-asl.sh"; exit 1; }
+	$(ASL) -q -D origin=0dc00h -o cpm/cpm22/ccp.p  -L -OLIST cpm/cpm22/ccp.lst  cpm/cpm22/ccp.asm
+	$(P2BIN) -q -l '$$00' -r '$$dc00-$$e3ff' cpm/cpm22/ccp.p  cpm/cpm22/ccp.bin
+	$(ASL) -q -D origin=0e400h -o cpm/cpm22/bdos.p -L -OLIST cpm/cpm22/bdos.lst cpm/cpm22/bdos.asm
+	$(P2BIN) -q -l '$$00' -r '$$e400-$$f1ff' cpm/cpm22/bdos.p cpm/cpm22/bdos.bin
+	$(ASL) -q -o cpm/cpm22/bios.p -L -OLIST cpm/cpm22/bios.lst cpm/cpm22/bios.asm
+	$(P2BIN) -q -l '$$00' -r '$$f200-$$f9ff' cpm/cpm22/bios.p cpm/cpm22/bios.bin
+	cat cpm/cpm22/ccp.bin cpm/cpm22/bdos.bin cpm/cpm22/bios.bin > $@
+	@ls -l $@
 
 # Run the MS COBOL square-root benchmark (jit vs interp).
 # Override N=... for a different workload size.

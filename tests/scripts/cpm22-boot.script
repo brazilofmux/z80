@@ -1,0 +1,11 @@
+# Native CP/M 2.2 smoke test: boot from an image holding hello.com and
+# block.com, DIR, run HELLO, TYPE nothing fancy. Run by tests/cpm22.sh.
+@wait-idle
+DIR\r
+@wait-idle
+HELLO\r
+@wait-idle
+BLOCK\r
+@wait-idle
+@dump cpm22-boot.dump
+@end

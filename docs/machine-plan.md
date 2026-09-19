@@ -218,6 +218,23 @@ dump; Zork plays in the cell-buffer terminal with the HUD live;
 
 ## Phase 2 — real CP/M 2.2
 
+**Status (2026-09-18, late): landed.** `make system` assembles DRI's CCP
+and BDOS (vendored from github.com/brouhaha/cpm22 into `cpm/cpm22/`,
+byte-exact) and our `bios.asm` with Macro Assembler AS
+(`tools/get-asl.sh` builds it; `cpm/cpm22/system.bin` is checked in).
+`./z80-monster -A disk.dsk` boots to `A>`; `tools/mkdsk` makes, fills,
+lists and extracts the two image formats in `tools/diskdefs` (cpmtools
+reads them with `-T raw`). Host ports are `E0-EF` as tabled below,
+implemented in `cpm/cpm_host.c`; while `cpm_traps_enabled` is 0 the
+interpreter and translators treat 0000/0005/the BIOS vectors as code
+and `PC=0` is a warm boot. Verified: `tests/cpm22.sh` (boot, DIR, run
+two programs) under `-j`, `-i` and strict `-V`; WordStar creates,
+saves and TYPEs a document from the native CCP; MS-COBOL compiles and
+links SQUARO under the native BDOS. `^]` leaves an interactive session.
+Still to do here: real system tracks on the image (the loader takes
+`system.bin` from the host), `--list` to a printer file is wired but
+untested, CP/M 3 is out of scope as planned.
+
 ### Layout and pieces
 
 - Memory: 62K system, exactly what the shim already assumes —

@@ -67,7 +67,7 @@
 #define KBD_IDLE_END_POLLS 40000   /* script exhausted: end after this many quiet polls */
 #define KBD_WAIT_IDLE_DEFAULT 20000 /* @wait-idle / ~ with no count */
 
-/* Host-terminal source (the default). */
+/* Host-terminal source (the default). ^] (0x1D) exits the emulator. */
 void kaypro_kbd_init(void);
 
 /* Host key mapping. The host terminal sends escape sequences for the

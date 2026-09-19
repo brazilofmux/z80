@@ -47,3 +47,11 @@ tests/*.dSYM/
 tests/scripts/*.dump
 tests/scripts/*.err
 tests/kbd_test
+tools/asl/
+cpm/cpm22/*.p
+cpm/cpm22/*.lst
+cpm/cpm22/ccp.bin
+cpm/cpm22/bdos.bin
+cpm/cpm22/bios.bin
+tests/scripts/*.dsk
+tools/mkdsk

@@ -923,6 +923,7 @@ static void emit_cb_bit_inline(emit_t *e, int n, int v, int xy) {
  * host service. JP NN traps on BDOS (0x0005) and the BIOS vector range;
  * CALL NN additionally traps on the warm-boot entry (0x0000). */
 static int is_jp_trap_target(uint16_t pc) {
+    if (!cpm_traps_enabled) return 0;      /* native CP/M: the BDOS and BIOS are code */
     return pc == CPM_BDOS_ENTRY
         || (pc >= CPM_BIOS_BASE && pc < CPM_BIOS_BASE + 0x80);
 }

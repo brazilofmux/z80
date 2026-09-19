@@ -772,6 +772,7 @@ static void emit_cb_bit_inline(emit_t *e, int n, a64_reg_t v, a64_reg_t xy) {
  * to translate control flow whose target lands here and let interp do
  * the dispatch. */
 static int is_jp_trap_target(uint16_t pc) {
+    if (!cpm_traps_enabled) return 0;      /* native CP/M: the BDOS and BIOS are code */
     return pc == CPM_BDOS_ENTRY
         || (pc >= CPM_BIOS_BASE && pc < CPM_BIOS_BASE + 0x80);
 }

@@ -28,6 +28,7 @@
 
 /* BIOS base — chosen so we have a 62K TPA (common for CP/M 2.2 on 64K machines) */
 #define CPM_BIOS_BASE   0xF200
+#define CPM_CCP_BASE    0xDC00   /* 62K system: CCP, BDOS at E400, BIOS at F200 */
 
 /* Number of BIOS functions in the jump table (classic is 17 for CP/M 2.2) */
 #define CPM_BIOS_COUNT  17
@@ -118,6 +119,17 @@ void cpm_console_wait(void);
  * that port (0xFF if nothing) — plus port 0xF0 as a debug byte echoed
  * to stderr under -d. Phase 2's BIOS port map replaces this. */
 void cpm_install_ports(z80_cpu_t *cpu);
+
+/* Native CP/M 2.2 (cpm_host.c): the guest runs DRI's CCP/BDOS and our
+ * BIOS (cpm/cpm22/), reaching the host only through ports E0-EF. While
+ * cpm_traps_enabled is 0 the interpreter and translators treat 0000,
+ * 0005 and the BIOS vectors as ordinary code, and reaching PC=0 is a
+ * warm boot rather than an exit. */
+extern int cpm_traps_enabled;
+int  cpm_host_mount(int drive, const char *path);      /* 0..15 = A..P; 0 ok */
+int  cpm_host_drive_type(int drive);                    /* 0 none, 1 floppy, 2 hard disk */
+void cpm_host_install(z80_cpu_t *cpu, const char *list_path);
+int  cpm_host_boot(z80_cpu_t *cpu, const char *system_path);
 
 /* BIOS support */
 void cpm_install_bios(z80_cpu_t *cpu);

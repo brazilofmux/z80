@@ -1,0 +1,45 @@
+# cpmtools disk definitions for the z80-monster image formats.
+# cpmtools reads ./diskdefs, so run it from tools/ (or copy this file
+# in); the libdsk-backed build needs the raw driver named:
+#   cpmls  -T raw -f z80m-hd image.dsk
+#   cpmcp  -T raw -f z80m-hd image.dsk file.com 0:
+#   mkfs.cpm -f z80m-hd image.dsk && truncate -s 8388608 image.dsk
+# tools/mkdsk does the same without cpmtools.
+# Both are plain 128-byte-record images, track-major, no skew, two
+# system tracks; the BIOS DPBs in cpm/cpm22/bios.asm describe the same
+# geometry.
+
+# 8 MB hard disk: 1024 tracks x 64 records, 4K blocks, 1024 entries.
+diskdef z80m-hd
+  seclen 128
+  tracks 1024
+  sectrk 64
+  blocksize 4096
+  maxdir 1024
+  skew 0
+  boottrk 2
+  os 2.2
+end
+
+# 400K floppy: 80 tracks x 40 records, 2K blocks, 64 entries.
+diskdef z80m-fd
+  seclen 128
+  tracks 80
+  sectrk 40
+  blocksize 2048
+  maxdir 64
+  skew 0
+  boottrk 2
+  os 2.2
+end
+diskdef z80m-fdr
+  seclen 128
+  tracks 80
+  sectrk 40
+  blocksize 2048
+  maxdir 64
+  skew 0
+  boottrk 2
+  os 2.2
+  libdsk:format raw
+end

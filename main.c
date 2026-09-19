@@ -160,6 +160,10 @@ static void usage(const char *prog) {
     printf("  --screen-dump FILE  With -K, write the screen text to FILE on exit\n");
     printf("  --script FILE       Headless: keystrokes from FILE (implies -K); see kaypro/kaypro_kbd.h\n");
     printf("  --no-hud            With -K on a terminal, don't show the BIPS line on host line 26\n");
+    printf("  -A IMG .. -P IMG    Mount disk images (tools/mkdsk, tools/diskdefs) and boot CP/M 2.2\n");
+    printf("                      when no .COM is given: DRI's CCP+BDOS on our BIOS (cpm/cpm22/)\n");
+    printf("  --system FILE       System image to boot (default: cpm/cpm22/system.bin next to the binary)\n");
+    printf("  --list FILE         Append LST: output to FILE (native CP/M only)\n");
     printf("  -h       This help\n\n");
     printf("Example:\n");
     printf("  %s tests/hello.com\n\n", prog);
@@ -176,6 +180,10 @@ int main(int argc, char **argv) {
     int kaypro_term = 0;
     const char *screen_dump = NULL;
     const char *script = NULL;
+    const char *drive_img[16] = {0};
+    int n_drives = 0;
+    const char *system_img = NULL;
+    const char *list_path = NULL;
 
     /* New flexible argument handling for fast real-binary iteration:
      *   ./z80-monster
@@ -205,6 +213,15 @@ int main(int argc, char **argv) {
             kaypro_term = 1;
         } else if (strcmp(argv[i], "--screen-dump") == 0 && i + 1 < argc) {
             screen_dump = argv[++i];
+        } else if (argv[i][0] == '-' && argv[i][1] >= 'A' && argv[i][1] <= 'P' && argv[i][2] == 0 && i + 1 < argc
+                   && argv[i][1] != 'K' && argv[i][1] != 'V') {
+            int d = argv[i][1] - 'A';
+            drive_img[d] = argv[++i];
+            n_drives++;
+        } else if (strcmp(argv[i], "--system") == 0 && i + 1 < argc) {
+            system_img = argv[++i];
+        } else if (strcmp(argv[i], "--list") == 0 && i + 1 < argc) {
+            list_path = argv[++i];
         } else if (strcmp(argv[i], "--no-hud") == 0) {
             g_hud = 0;
         } else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
@@ -225,7 +242,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!prog && !disk_root) {
+    if (!prog && !disk_root && n_drives == 0) {
         print_banner();
         usage(argv[0]);
         return 0;
@@ -294,6 +311,7 @@ int main(int argc, char **argv) {
     }
 
     const char *final_prog = prog ? prog : auto_prog;
+    if ((!final_prog || !*final_prog) && n_drives > 0) final_prog = "CP/M 2.2";   /* native boot: no .COM */
 
     if (!final_prog || !*final_prog) {
         fprintf(stderr, "No .com program specified or found in '%s'\n", root_to_use ? root_to_use : ".");
@@ -308,12 +326,27 @@ int main(int argc, char **argv) {
     z80_cpu_t cpu;
     z80_cpu_init(&cpu);
 
-    if (cpm_load_com(&cpu, final_prog) != 0) {
+    int native = (n_drives > 0 && !prog);
+    if (native) {
+        /* Boot CP/M 2.2 from the system image with the given drives. */
+        char sys_default[PATH_MAX];
+        if (!system_img) {
+            /* next to the binary: <dir of argv[0]>/cpm/cpm22/system.bin, else the cwd's */
+            const char *sl = strrchr(argv[0], '/');
+            if (sl) snprintf(sys_default, sizeof sys_default, "%.*s/cpm/cpm22/system.bin", (int)(sl - argv[0]), argv[0]);
+            else    snprintf(sys_default, sizeof sys_default, "cpm/cpm22/system.bin");
+            system_img = sys_default;
+        }
+        for (int d = 0; d < 16; d++)
+            if (drive_img[d] && cpm_host_mount(d, drive_img[d]) != 0) return 1;
+        if (cpm_host_boot(&cpu, system_img) != 0) return 1;
+        cpm_host_install(&cpu, list_path);
+    } else if (cpm_load_com(&cpu, final_prog) != 0) {
         fprintf(stderr, "Failed to load %s\n", final_prog);
         return 1;
     }
 
-    cpm_install_ports(&cpu);
+    if (!native) cpm_install_ports(&cpu);
     install_signal_handlers(&cpu);
 
     enter_raw_mode();
@@ -375,7 +408,7 @@ int main(int argc, char **argv) {
         /* Run the interpreter until it hits a terminating condition */
         for (;;) {
             /* Direct termination conditions (very common in real .COMs) */
-            if (cpu.pc == 0 && cpu.insn_count > 4) {
+            if (cpm_traps_enabled && cpu.pc == 0 && cpu.insn_count > 4) {
                 /* Classic CP/M termination: JP 0, RET to 0 on stack, etc. */
                 exit_note("[exit] PC=0000 after %llu insns (RET/JP 0 warmboot)\n",
                         (unsigned long long)cpu.insn_count);

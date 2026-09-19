@@ -20,6 +20,7 @@
  * as untranslatable, so it falls through to the interpreter, which
  * already knows how to dispatch the host shim. */
 #include "dbt.h"
+#include "../cpm/cpm.h"
 #include "dbt_flags.h"
 #include "../core/z80.h"
 #include <stdio.h>
@@ -204,7 +205,7 @@ int dbt_run(z80_dbt_t *dbt) {
         }
 
         /* Mirror main.c's "RET to warm boot" termination check. */
-        if (cpu->pc == 0 && cpu->insn_count > 4) {
+        if (cpm_traps_enabled && cpu->pc == 0 && cpu->insn_count > 4) {
             return 0;
         }
         if (cpu->insn_count > 50000000000ULL) {
