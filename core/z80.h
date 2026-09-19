@@ -107,6 +107,13 @@ typedef struct z80_cpu {
     /* Pointer to the block cache base (for inline lookup from generated code) */
     void     *block_cache;
 
+    /* x86-64 return-address stack: the host RSP inside translated code
+     * with no guest frames pushed (RET mismatch / JIT exit unwind to it),
+     * and the CALL budget that bounds host-stack growth — every guest
+     * CALL decrements it; at zero the CALL unwinds to the base first. */
+    void     *jit_sp_base;
+    uint32_t  jit_call_budget;
+
     /* Back-pointer to the DBT state. Set by dbt_init when the JIT is in
      * use; NULL otherwise. JIT helpers (SMC invalidation, ...) reach the
      * dbt-side state via this. */

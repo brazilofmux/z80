@@ -53,12 +53,15 @@ dirs:
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
-# Generic rule (dependencies will be added as we create headers)
+# Generic rule with automatic header dependencies (-MMD), so a struct
+# change in core/z80.h rebuilds every object that includes it.
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(OBJS:.o=.d)
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(OBJS:.o=.d) $(TARGET)
 	rm -rf core/*.o dbt/*.o cpm/*.o kaypro/*.o
 	rm -f tools/mkhello tools/mkblock
 	rm -f tests/*.com tests/*.bin

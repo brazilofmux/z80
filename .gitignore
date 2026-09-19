@@ -1,6 +1,7 @@
 # Build artifacts
 *.o
 *.obj
+*.d
 
 # Binaries we build (keep the .c sources)
 z80-monster

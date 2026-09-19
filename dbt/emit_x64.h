@@ -405,6 +405,32 @@ static inline void emit_jmp_m64(emit_t *e, int base, int index, int32_t disp) {
     x64_mem(e, 0, 0, 0, 0xFF, -1, 4, base, index, disp);
 }
 static inline void emit_ret(emit_t *e) { emit_byte(e, 0xC3); }
+/* call rel32 placeholder; returns the rel32 field offset. */
+static inline uint32_t emit_call_rel32(emit_t *e) {
+    emit_byte(e, 0xE8);
+    uint32_t at = emit_pos(e);
+    emit_u32(e, 0);
+    return at;
+}
+static inline void emit_call_rel32_to(emit_t *e, uint32_t target_off) {
+    uint32_t at = emit_call_rel32(e);
+    emit_patch_rel32(e, at, target_off);
+}
+/* push imm32 (sign-extended to 64 bits) */
+static inline void emit_push_imm32(emit_t *e, int32_t imm) {
+    emit_byte(e, 0x68);
+    emit_u32(e, (uint32_t)imm);
+}
+/* op dword [mem], imm8 (sign-extended) */
+static inline void emit_alu_m32_imm8(emit_t *e, int op, int base, int index, int32_t disp, int8_t imm) {
+    x64_mem(e, 0, 0, 0, 0x83, -1, op, base, index, disp);
+    emit_byte(e, (uint8_t)imm);
+}
+/* mov dword [mem], imm32 */
+static inline void emit_mov_m32_imm32(emit_t *e, int base, int index, int32_t disp, uint32_t imm) {
+    x64_mem(e, 0, 0, 0, 0xC7, -1, 0, base, index, disp);
+    emit_u32(e, imm);
+}
 static inline void emit_push_r64(emit_t *e, int r) {
     x64_rex(e, 0, 0, -1, r, 0);
     emit_byte(e, (uint8_t)(0x50 | (r & 7)));

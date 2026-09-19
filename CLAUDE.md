@@ -69,7 +69,9 @@ typedef struct {
     RCX=A, RDX=F, R9=count; RAX/RSI/RDI/R10/R11 scratch. A/F live in
     RCX/RDX because `LAHF` yields S Z - H - P N C in Z80 bit order, so
     ADD/SUB/ADC/SBC/CP build F from native flags. The caller-saved
-    pinned registers are pushed around helper calls. See atop
+    pinned registers are pushed around helper calls. Guest CALL/RET
+    ride the hardware return predictor (native call/ret with the guest
+    return pc on the host stack; `Z80_NO_RAS=1` disables). See atop
     `dbt/dbt_x64.c`.
 - IX/IY/memptr/q stay context-resident (cooler paths).
 - Guest memory is mapped with a mirror page past 0xFFFF

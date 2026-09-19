@@ -66,6 +66,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 int dbt_jit_available(void) { return 1; }
 
@@ -122,6 +123,41 @@ int dbt_jit_available(void) { return 1; }
 #define OFF_Q          (int32_t)offsetof(z80_cpu_t, q)
 #define OFF_MEMPTR     (int32_t)offsetof(z80_cpu_t, memptr)
 #define OFF_INSN_COUNT (int32_t)offsetof(z80_cpu_t, insn_count)
+#define OFF_SP_BASE    (int32_t)offsetof(z80_cpu_t, jit_sp_base)
+#define OFF_CALL_BUDGET (int32_t)offsetof(z80_cpu_t, jit_call_budget)
+
+/* ----------------------------------------------------------------------
+ * Hardware-paired return-address stack (RAS).
+ *
+ * Guest CALL pushes its guest return pc on the HOST stack and does a
+ * native CALL into the target block; guest RET pops the guest pc from
+ * guest memory, compares it with the slot on top of the host stack and,
+ * on a match, native-RETs — riding the hardware return predictor
+ * instead of the indirect probe. The host frame is {host_ret, guest_pc}
+ * (16 bytes, so alignment is preserved). Anything that breaks the
+ * pairing — a mismatch, a probe miss, a JIT exit, or the CALL budget
+ * running out — resets RSP to the base recorded by the trampoline,
+ * which sits above a sentinel frame whose guest_pc (-1) can never match.
+ *
+ * The budget is a counter in the context rather than a compare against
+ * a limit because reading RSP explicitly costs a stack-engine sync uop
+ * on Intel; measured, `cmp rsp,[limit]` per CALL turned a 3% win into a
+ * 6% loss. One forced unwind per RAS_CALL_BUDGET calls is noise.
+ *
+ * Stale landing code is harmless: after a native RET the landing code
+ * only edges to the fall-through pc, and edges are (un)linked through
+ * the same registry as everything else; the code buffer itself is only
+ * ever reset from C with the host stack fully unwound.
+ *
+ * Z80_NO_RAS=1 disables it (plain JMP edges for CALL, probe for RET)
+ * so the two can be A/B measured. AArch64 measured a loss with this
+ * scheme; see the note in dbt_a64.c.
+ * ---------------------------------------------------------------------- */
+static int s_use_ras = -1;
+
+/* Guest CALLs between forced unwinds: bounds host-stack growth from
+ * CALLs that never RET (16 bytes each) to RAS_CALL_BUDGET * 16 bytes. */
+#define RAS_CALL_BUDGET (32u * 1024u)
 
 /* ----------------------------------------------------------------------
  * Trampoline + exit stub.
@@ -143,6 +179,8 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
     emit_push_r64(&e, X64_R15);
     emit_alu_r64_imm(&e, X64_ALU_SUB, X64_RSP, 8);
 
+    if (s_use_ras < 0) s_use_ras = !getenv("Z80_NO_RAS");
+
     /* Bind host register convention. The block pointer is parked in RAX
      * because RDX is about to become F. */
     emit_mov_r64_r64(&e, T0, X64_RDX);
@@ -150,6 +188,15 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
     emit_mov_r64_r64(&e, R_MEM, X64_RSI);
     emit_mov_r64_r64(&e, R_AUX, X64_RCX);
     emit_alu_r32_r32(&e, X64_ALU_XOR, R_CNT, R_CNT);
+
+    if (s_use_ras) {
+        /* Sentinel RAS frame {host_ret=0, guest_pc=-1}, then record the
+         * base (RSP with no guest frames) and arm the CALL budget. */
+        emit_push_imm32(&e, -1);
+        emit_push_imm32(&e, 0);
+        emit_mov_m64_r64(&e, R_CPU, X64_NOREG, OFF_SP_BASE, X64_RSP);
+        emit_mov_m32_imm32(&e, R_CPU, X64_NOREG, OFF_CALL_BUDGET, RAS_CALL_BUDGET);
+    }
 
     /* Load the pinned guest state. */
     emit_movzx_r32_m16(&e, R_BC, R_CPU, X64_NOREG, OFF_BC);
@@ -176,7 +223,13 @@ void dbt_emit_trampoline(z80_dbt_t *dbt) {
     /* Flush the pending insn count. */
     emit_add_m64_r64(&e, R_CPU, X64_NOREG, OFF_INSN_COUNT, R_CNT);
 
-    /* Unwind the trampoline frame and return to its caller. */
+    /* Unwind the trampoline frame and return to its caller. With the
+     * RAS, RSP may be any number of guest frames deep: reset it to the
+     * base first and drop the sentinel frame. */
+    if (s_use_ras) {
+        emit_mov_r64_m64(&e, X64_RSP, R_CPU, X64_NOREG, OFF_SP_BASE);
+        emit_alu_r64_imm(&e, X64_ALU_ADD, X64_RSP, 16);
+    }
     emit_alu_r64_imm(&e, X64_ALU_ADD, X64_RSP, 8);
     emit_pop_r64(&e, X64_R15);
     emit_pop_r64(&e, X64_R14);
@@ -547,12 +600,91 @@ static void emit_edge(z80_dbt_t *dbt, emit_t *e, uint16_t pc) {
     emit_dynamic_tail(e, dbt->exit_stub_off);
 }
 
-/* Rewrite the patchable JMP rel32 at site_off (see emit_edge). target ==
- * NULL re-aims it at its own fallback probe (site + 5). x86 keeps
- * instruction fetch coherent with same-thread stores, so no flush. */
+/* Byte sizes the CALL edge layout depends on (checked at emission). */
+#define DYN_TAIL_BYTES     28   /* emit_dynamic_tail */
+#define EDGE_BYTES         (5 + 5 + DYN_TAIL_BYTES)
+#define CALL_LANDING_BYTES (4 + EDGE_BYTES)   /* add rsp,8 ; edge */
+
+/* CALL edge (RAS form):
+ *
+ *   sub  dword [cpu->jit_call_budget], 1
+ *   jnz  .ok
+ *   mov  rsp, [cpu->jit_sp_base]      ; budget spent: forget the pairing
+ *   mov  dword [cpu->jit_call_budget], RAS_CALL_BUDGET
+ * .ok:
+ *   push guest_ret_pc
+ *   mov  eax, target
+ *   call <target block | probe_stub>  ; the patchable link site (E8)
+ * landing:
+ *   add  rsp, 8                       ; drop the guest_pc slot
+ *   <edge(pc_after)>                  ; continue after the CALL
+ * probe_stub:
+ *   <dynamic tail>                    ; unlinked fallback; a hit jumps
+ *                                     ; into the block, which RETs here
+ *
+ * The site's fallback is probe_stub, a fixed CALL_LANDING_BYTES past
+ * the instruction after the CALL; dbt_arch_patch_link tells the two
+ * site kinds apart by opcode byte (E8 vs E9). */
+static void emit_call_edge(z80_dbt_t *dbt, emit_t *e, uint16_t target, uint16_t pc_after) {
+    if (!s_use_ras) {
+        emit_edge(dbt, e, target);
+        return;
+    }
+    emit_alu_m32_imm8(e, X64_ALU_SUB, R_CPU, X64_NOREG, OFF_CALL_BUDGET, 1);
+    uint32_t ok = emit_pos(e);
+    emit_jcc_rel8(e, X64_CC_NZ, 0);
+    emit_mov_r64_m64(e, X64_RSP, R_CPU, X64_NOREG, OFF_SP_BASE);
+    emit_mov_m32_imm32(e, R_CPU, X64_NOREG, OFF_CALL_BUDGET, RAS_CALL_BUDGET);
+    e->buf[ok + 1] = (uint8_t)(emit_pos(e) - (ok + 2));
+
+    emit_push_imm32(e, (int32_t)pc_after);
+    emit_mov_r32_imm32(e, T0, target);
+    uint32_t site = e->offset;
+    uint32_t probe_stub = site + 5 + CALL_LANDING_BYTES;
+    int linked = 0;
+    if (dbt_link_record(dbt, target, site)) {
+        z80_block_entry_t *be = &dbt->cache[target];
+        if (be->guest_pc == (uint32_t)target && be->native_code) {
+            emit_call_rel32_to(e, (uint32_t)(be->native_code - e->buf));
+            linked = 1;
+        }
+    }
+    if (!linked)
+        emit_call_rel32_to(e, probe_stub);
+
+    /* landing */
+    emit_alu_r64_imm(e, X64_ALU_ADD, X64_RSP, 8);
+    emit_edge(dbt, e, pc_after);
+    if (e->offset != probe_stub) {
+        fprintf(stderr, "dbt_x64: CALL edge layout drift (%u vs %u)\n",
+                e->offset - (site + 5), CALL_LANDING_BYTES);
+        abort();
+    }
+    emit_dynamic_tail(e, dbt->exit_stub_off);
+}
+
+/* RET tail: EAX holds the popped guest pc.
+ *   cmp  [rsp+8], eax ; jne .miss ; ret
+ * .miss: mov rsp, [cpu->jit_sp_base] ; <dynamic tail> */
+static void emit_ret_tail(emit_t *e, uint32_t exit_stub_off) {
+    if (s_use_ras) {
+        emit_cmp_m32_r32(e, X64_RSP, X64_NOREG, 8, T0);
+        emit_jcc_rel8(e, X64_CC_NE, 1);
+        emit_ret(e);
+        emit_mov_r64_m64(e, X64_RSP, R_CPU, X64_NOREG, OFF_SP_BASE);
+    }
+    emit_dynamic_tail(e, exit_stub_off);
+}
+
+/* Rewrite the patchable JMP/CALL rel32 at site_off (see emit_edge and
+ * emit_call_edge). target == NULL re-aims it at its own fallback probe:
+ * the next instruction for a JMP, CALL_LANDING_BYTES further for a CALL.
+ * x86 keeps instruction fetch coherent with same-thread stores, so no
+ * flush. */
 void dbt_arch_patch_link(z80_dbt_t *dbt, uint32_t site_off, uint8_t *target) {
     uint8_t *site = dbt->code_buf + site_off;
-    uint8_t *dst  = target ? target : site + 5;
+    uint8_t *fallback = site + 5 + (site[0] == 0xE8 ? CALL_LANDING_BYTES : 0);
+    uint8_t *dst  = target ? target : fallback;
     int32_t  disp = (int32_t)(dst - (site + 5));
     int32_t  cur;
     memcpy(&cur, site + 1, 4);
@@ -1755,12 +1887,12 @@ static void emit_cond_taken_tail(z80_dbt_t *dbt, emit_t *e,
     }
     case Z80_OP_CALL_CC_NN:
         emit_push16_imm(e, pc_after);
-        emit_edge(dbt, e, dec->imm16);
+        emit_call_edge(dbt, e, dec->imm16, pc_after);
         break;
-    default:   /* RET cc: pop a run-time pc -> dynamic tail */
+    default:   /* RET cc: pop a run-time pc -> RAS-paired return / probe */
         emit_pop16_into(e, T0);
         emit_mov_m16_r16(e, R_CPU, X64_NOREG, OFF_MEMPTR, T0);
-        emit_dynamic_tail(e, dbt->exit_stub_off);
+        emit_ret_tail(e, dbt->exit_stub_off);
         break;
     }
 }
@@ -1791,14 +1923,14 @@ static void emit_branch_ender(z80_dbt_t *dbt, emit_t *e,
     case Z80_OP_CALL_NN:
         emit_push16_imm(e, pc_after);
         emit_set_memptr_imm(e, dec->imm16);
-        emit_edge(dbt, e, dec->imm16);
+        emit_call_edge(dbt, e, dec->imm16, pc_after);
         return;
 
     case Z80_OP_RET:
         /* RET: pop pc into EAX, sp += 2, memptr = popped pc. */
         emit_pop16_into(e, T0);
         emit_mov_m16_r16(e, R_CPU, X64_NOREG, OFF_MEMPTR, T0);
-        emit_dynamic_tail(e, dbt->exit_stub_off);
+        emit_ret_tail(e, dbt->exit_stub_off);
         return;
 
     case Z80_OP_JP_CC_NN:
