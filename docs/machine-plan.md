@@ -234,8 +234,22 @@ two programs) under `-j`, `-i` and strict `-V`; WordStar creates,
 saves and TYPEs a document from the native CCP; MS-COBOL compiles and
 links SQUARO under the native BDOS. `^]` leaves an interactive session.
 Still to do here: real system tracks on the image (the loader takes
-`system.bin` from the host), `--list` to a printer file is wired but
-untested, CP/M 3 is out of scope as planned.
+`system.bin` from the host); CP/M 3 is out of scope as planned.
+`--list` to a printer file works (WordStar's Teletype driver output
+checked against its disk-file output, 2026-09-19). One open question:
+type-ahead into a running MS-COBOL program (a whole job piped into
+stdin, so the ACCEPTs find their lines already queued) corrupted the
+program's WORKING-STORAGE, while the same lines paced by `@wait-idle`
+were fine. Probably the MS-COBOL run-time's own console handling, but
+worth a look with `-V` before blaming the guest.
+
+A first real batch workload now exists outside this repo: the MVS
+COBOL reports of a bookkeeping project ported to MS-COBOL 4.65 and run
+on our CP/M 2.2 from disk images built on the fly (external sort in
+COBOL, DFSORT-style decks, job streams as `--script` files). Two sorts
+plus two report programs over a few hundred records cost 1.15 G
+instructions and run at 4.7 BIPS; the same job lockstep-verifies
+clean. Its 57K-record sort will be the next stress test.
 
 ### Layout and pieces
 
