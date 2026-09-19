@@ -2001,6 +2001,73 @@ static void emit_branch_ender(z80_dbt_t *dbt, emit_t *e,
     }
 }
 
+/* ----------------------------------------------------------------------
+ * Countdown loops in closed form.
+ *
+ *   DEC r ; JP NZ,<the DEC>      DEC r ; JR NZ,<the DEC>      DJNZ $
+ *
+ * touch no memory and no I/O, and their exit state is fully determined:
+ * r = 0, and for the DEC forms F = (F & C) | FT_DEC[0] (the flags of the
+ * final 1 -> 0 step). The number of iterations is r, or 256 when r is
+ * 0, so the skipped instructions are added to the pending count — the
+ * -V shadow steps every iteration and lands on the same registers and
+ * the same insn_count. Guest programs use these as delays calibrated
+ * for a 4 MHz Z80: WordStar's 256-spin "tick" was 22% of all the
+ * instructions of a global search-and-replace.
+ *
+ * memptr: JP cc,nn stores nn on both paths; JR cc / DJNZ store the
+ * target only when taken, i.e. iff the loop ran at least twice.
+ * ---------------------------------------------------------------------- */
+enum { FUSE_NONE = 0, FUSE_DEC_JP, FUSE_DEC_JR, FUSE_DJNZ };
+
+static int countdown_kind(const z80_decoded *decs, const uint16_t *pc_afters,
+                          uint32_t i, uint32_t n_ops) {
+    const z80_decoded *d = &decs[i];
+    uint16_t pc_i = (uint16_t)(pc_afters[i] - d->bytes);
+    if (d->prefix == 0xDD || d->prefix == 0xFD) return FUSE_NONE;
+    if (d->type == Z80_OP_DJNZ)
+        return (uint16_t)(pc_afters[i] + (int16_t)d->disp) == pc_i ? FUSE_DJNZ : FUSE_NONE;
+    if (d->type != Z80_OP_DEC_R || d->reg1 == 6 || i + 1 >= n_ops) return FUSE_NONE;
+    const z80_decoded *j = &decs[i + 1];
+    if (j->prefix == 0xDD || j->prefix == 0xFD || j->cc != 0) return FUSE_NONE;   /* cc 0 = NZ */
+    if (j->type == Z80_OP_JP_CC_NN && j->imm16 == pc_i) return FUSE_DEC_JP;
+    if (j->type == Z80_OP_JR_CC_E &&
+        (uint16_t)(pc_afters[i + 1] + (int16_t)j->disp) == pc_i) return FUSE_DEC_JR;
+    return FUSE_NONE;
+}
+
+static void emit_countdown(emit_t *e, int kind, int reg, uint16_t loop_pc) {
+    /* W2 = r (canonical), W9 = iterations - 1 = (r - 1) & 0xFF */
+    a64_reg_t v = emit_read_r8(e, A64_W2, reg, 0);
+    emit_sub_w32_imm(e, A64_W9, v, 1);
+    (void)emit_and_w32_imm(e, A64_W9, A64_W9, 0xFF);
+    /* skipped instructions: 2 per extra iteration for DEC+branch, 1 for DJNZ */
+    if (kind == FUSE_DJNZ) emit_add_x64_w32_uxtw(e, R_CNT, R_CNT, A64_W9);
+    else {
+        emit_lsl_w32_imm(e, A64_W10, A64_W9, 1);
+        emit_add_x64_w32_uxtw(e, R_CNT, R_CNT, A64_W10);
+    }
+    /* r = 0 */
+    emit_movz_w32(e, A64_W11, 0, 0);
+    emit_write_r8(e, reg, 0, A64_W11);
+    /* flags of the last DEC (1 -> 0), C preserved */
+    if (kind != FUSE_DJNZ) {
+        (void)emit_and_w32_imm(e, A64_W13, R_F, Z80_FLAG_C);
+        emit_ldrb_imm(e, A64_W12, R_AUX, FT_DEC + 0);
+        emit_orr_w32(e, R_F, A64_W12, A64_W13);
+    }
+    /* memptr */
+    if (kind == FUSE_DEC_JP) {
+        emit_set_memptr_imm(e, loop_pc);
+    } else {
+        emit_ldrh_imm(e, A64_W12, R_CPU, OFF_MEMPTR);
+        emit_movz_w32(e, A64_W13, loop_pc, 0);
+        emit_cmp_w32_imm(e, A64_W9, 0);
+        emit_csel_w32(e, A64_W12, A64_W13, A64_W12, A64_COND_NE);   /* taken at least once */
+        emit_strh_imm(e, A64_W12, R_CPU, OFF_MEMPTR);
+    }
+}
+
 uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     if (s_strict_exit < 0)
         s_strict_exit = dbt->verify && getenv("Z80_VERIFY_STRICT") != NULL;
@@ -2104,6 +2171,20 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
 
     for (uint32_t i = 0; i < n_ops; i++) {
         const z80_decoded *dec = &decs[i];
+
+        int fuse = countdown_kind(decs, pc_afters, i, n_ops);
+        if (fuse != FUSE_NONE) {
+            /* The DEC (or DJNZ) and its backward branch become one closed
+             * form; the branch's not-taken path continues below. Neither
+             * form leaves F written by its last instruction (a branch),
+             * so q is clear afterwards. */
+            emit_countdown(&e, fuse, fuse == FUSE_DJNZ ? 0 : dec->reg1,
+                           (uint16_t)(pc_afters[i] - dec->bytes));
+            q_mode = Q_CLEAR;
+            prev_q = 0;
+            if (fuse != FUSE_DJNZ) i++;          /* the branch is consumed */
+            continue;
+        }
 
         if (is_uncond_ender(dec->type) ||
             (is_cond_ender(dec->type) && i == n_ops - 1)) {

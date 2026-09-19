@@ -71,7 +71,7 @@ test: test-video test-render test-kbd test-guest test-apps
 # Guest-side tests: the generated .COMs under the interpreter, the JIT,
 # and lockstep verify. ports.com is the Phase 0 acceptance test (every
 # port op traps, so all three modes exercise the same interpreter path).
-GUEST_TESTS = tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/ports.com
+GUEST_TESTS = tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/ports.com tests/loop.com
 .PHONY: test-guest
 test-guest: $(TARGET) $(GUEST_TESTS)
 	@fail=0; \
@@ -179,6 +179,13 @@ tests/cb.com: tools/mkcb
 	./tools/mkcb
 
 tools/mkcb: tools/mkcb.c
+	$(CC) -o $@ $<
+
+tests/loop.com: tools/mkloop
+	@mkdir -p tests
+	./tools/mkloop
+
+tools/mkloop: tools/mkloop.c
 	$(CC) -o $@ $<
 
 tests/ix.com: tools/mkix

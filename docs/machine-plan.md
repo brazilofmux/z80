@@ -325,9 +325,17 @@ First measurement 2.84 BIPS with a quarter of the wall clock in ~905 K
 console port traps; with `IN A,(n)` / `OUT (n),A` translated as direct
 helper calls (AArch64; off under `-V` so the shadow re-sync stays
 exact; `Z80_NO_INLINE_PORTS=1` for A/B) there are no fallbacks at all
-and it runs at **3.17 BIPS**. Native SQUARO is within a few percent of
-the shim's 4.3. The gap to 10 is now entirely in translated code, which
-is where the per-application work was always going to be.
+and it runs at 3.17 BIPS. Native SQUARO is at parity with the shim.
+
+The interpreter profiler (`Z80_PROFILE=1 -i`) then showed 22% of all
+instructions in one two-instruction loop: WordStar's timing tick, `DEC
+A; JP NZ` spun 256 times, 124 600 times per replace. Countdown loops
+(`DEC r; JP NZ/JR NZ,self`, `DJNZ $`) are now translated in closed form
+with the skipped instructions added to the count (tests/loop.com under
+-i/-j/-V agrees to the instruction): **4.6 BIPS**. Next in the profile:
+the search-compare loop at 5771-57A1 (~10%) and 8080-style byte-copy
+loops (`LD A,(HL); LD (DE),A; INC HL; INC DE; DEC C; JP NZ`, ~3%) —
+the second is a generic idiom worth an intrinsic, like LDIR.
 
 - WordStar 3.3 with the Kaypro terminal definition (or WS 4 installed
   for Kaypro), dBASE II 2.41, Turbo Pascal 3.0 (has a Kaypro install),
