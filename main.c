@@ -147,6 +147,31 @@ static void screen_dump_at_exit(void) {
     if (sf != stdout) fclose(sf); else fflush(sf);
 }
 
+/* -s: stats on every exit path (a script's end and ^] leave through
+ * exit(), not main's tail), so keep what they need in globals. */
+static int g_show_stats;
+static z80_cpu_t *g_stats_cpu;
+static z80_dbt_t *g_stats_dbt;
+static int g_stats_used_jit;
+static struct timespec g_t0;
+static void print_stats_at_exit(void) {
+    if (!g_show_stats || !g_stats_cpu) return;
+    g_show_stats = 0;
+    struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
+    double secs = (double)(t1.tv_sec - g_t0.tv_sec) + (double)(t1.tv_nsec - g_t0.tv_nsec) / 1e9;
+    printf("\n--- stats ---\n");
+    printf("Instructions: %llu\n", (unsigned long long)g_stats_cpu->insn_count);
+    printf("Host time:    %.3f s\n", secs);
+    if (secs > 0) printf("Rate:         %.3f BIPS\n", (double)g_stats_cpu->insn_count / secs / 1e9);
+    printf("Console polls: %llu (longest quiet run %u)\n",
+           (unsigned long long)kaypro_kbd_polls(), kaypro_kbd_max_quiet_streak());
+    if (g_stats_used_jit && g_stats_dbt) {
+        printf("JIT:\n");
+        dbt_print_stats(g_stats_dbt, stdout);
+    }
+    fflush(stdout);
+}
+
 static void usage(const char *prog) {
     printf("Usage: %s [options] <program.com>\n\n", prog);
     printf("Options:\n");
@@ -395,6 +420,10 @@ int main(int argc, char **argv) {
         g_hud_dbt = dbt;
     }
 
+    g_show_stats = show_stats; g_stats_cpu = &cpu; g_stats_dbt = dbt; g_stats_used_jit = use_jit;
+    clock_gettime(CLOCK_MONOTONIC, &g_t0);
+    atexit(print_stats_at_exit);
+
     if (use_jit) {
         used_jit = 1;
         int rc = dbt_run(dbt);
@@ -447,7 +476,9 @@ int main(int argc, char **argv) {
      * are actually visible when stdout is the terminal. */
     leave_kaypro_screen();
 
-    if (show_stats) {
+    if (show_stats) print_stats_at_exit();
+    show_stats = 0;                 /* already printed; the atexit copy is a no-op */
+    if (0) {
         printf("\n--- stats ---\n");
         printf("Instructions: %llu\n", (unsigned long long)cpu.insn_count);
         if (kaypro_term)

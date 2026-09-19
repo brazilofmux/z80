@@ -492,7 +492,17 @@ int kaypro_kbd_read(void) {
     for (;;) {
         int r = host_fetch(1);
         if (r == 1) return q_pop();
-        if (r < 0) return 0x1A;          /* stdin EOF: CP/M's ^Z */
+        if (r < 0) {
+            /* stdin EOF: hand the guest CP/M's ^Z a few times (programs
+             * reading piped input end on it), then end the session — a
+             * native CCP would otherwise prompt forever. */
+            static int eof_reads;
+            if (++eof_reads > 8) {
+                fprintf(stderr, "[exit] stdin closed, guest still reading\n");
+                exit(0);
+            }
+            return 0x1A;
+        }
         /* r == 0: an unmapped key was swallowed; keep waiting */
     }
 }

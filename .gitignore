@@ -55,3 +55,4 @@ cpm/cpm22/bdos.bin
 cpm/cpm22/bios.bin
 tests/scripts/*.dsk
 tools/mkdsk
+disks/work.dsk

@@ -117,6 +117,17 @@ tests/render_test: tests/render_test.c kaypro/kaypro_render_tty.c kaypro/kaypro_
 test-render: tests/render_test
 	./tests/render_test
 
+# The standard work disk: an 8 MB image holding every file under disks/
+# except the exercisers (WordStar, dBASE, Turbo Pascal, MS-COBOL, MBASIC,
+# M80/L80, Zork... whatever you have there). Git-ignored like its inputs.
+#   ./z80-monster -j -K -A disks/work.dsk
+.PHONY: workdisk
+workdisk: tools/mkdsk
+	@rm -f disks/work.dsk
+	@files=$$(find disks -mindepth 2 -maxdepth 2 -type f ! -path 'disks/zex/*' ! -name '.*' ! -name '*.txt' ! -name '*,280' | sort); \
+	  n=0; for f in $$files; do ./tools/mkdsk disks/work.dsk "$$f" > /dev/null; n=$$((n+1)); done; \
+	  echo "disks/work.dsk: $$n files"; ./tools/mkdsk -l disks/work.dsk | tail -1
+
 # Disk image tool (tools/mkdsk.c): make, fill, list, extract z80m images.
 tools/mkdsk: tools/mkdsk.c
 	$(CC) $(CFLAGS) -o $@ tools/mkdsk.c
