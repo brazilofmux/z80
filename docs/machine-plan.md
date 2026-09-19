@@ -44,7 +44,9 @@ proves them wrong):
   shadow CPUs both execute the console BDOS calls and consume keystrokes
   alternately (see the note in `dbt_run`).
 - Software on hand (all in `disks/`, git-ignored): zexdoc/zexall,
-  MS-COBOL 4.65, Zork 1, WordStar 3.00 (INSTALLed for ADM-3A: creates,
+  MS-COBOL 4.65, Zork 1, WordStar 3.00 (INSTALLed for ADM-3A, then
+  `tools/wskaypro.sh` for the Kaypro '84 strings INSTALL predates:
+  inverse video, erase to end of line, line insert/delete; creates,
   edits and saves documents under the shim), dBASE II 2.41 (INSTALLed
   for Kaypro II: creates a database, appends, replaces and displays
   records, `tests/dbase.sh`), Turbo Pascal 3.00A (already

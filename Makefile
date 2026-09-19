@@ -131,7 +131,9 @@ workdisk: tools/mkdsk
 # Two floppies, the way a Kaypro shipped them: A: the working disk (BASIC,
 # M80/L80, a README and a letter to edit), B: WordStar 3.0 with its
 # overlays, MailMerge and INSTALL. Needs disks/wordstar/ (and whatever
-# else is present; missing pieces are left out). Then:
+# else is present; missing pieces are left out). WS.COM should be
+# INSTALLed for the ADM-3A and then run through tools/wskaypro.sh, which
+# adds the Kaypro '84 inverse-video and erase strings INSTALL predates. Then:
 #   ./z80-monster -j -K -A disks/a.dsk -B disks/b.dsk     B: then WS
 .PHONY: floppies
 floppies: tools/mkdsk

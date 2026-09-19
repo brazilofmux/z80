@@ -1,6 +1,7 @@
 #!/bin/sh
 # WordStar 3.00 headless smoke test. Needs disks/wordstar/WS.COM installed
-# for the ADM-3A (see docs/machine-plan.md, Phase 3); skips if absent.
+# for the ADM-3A (see docs/machine-plan.md, Phase 3), with or without the
+# tools/wskaypro.sh patch; skips if absent.
 # Usage: tests/wordstar.sh [jit|interp|verify]
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/.." && pwd)
