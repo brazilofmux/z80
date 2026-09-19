@@ -495,3 +495,33 @@ void z80_jit_loop_fill(z80_cpu_t *cpu, uint32_t spec, uint16_t pc) {
     loop_epilogue(cpu, cnt, n, spec, pc);
     smc_sweep_forward(cpu, dst, n);
 }
+
+void z80_jit_loop_filtercopy(z80_cpu_t *cpu, uint32_t spec, uint16_t pc_head, uint16_t pc_exit) {
+    uint8_t m = (uint8_t)spec, lo = (uint8_t)(spec >> 8), sen = (uint8_t)(spec >> 16);
+    uint16_t dst0 = cpu->hl;
+    int64_t executed = 0;
+    for (;;) {
+        cpu->a = cpu->mem[cpu->de];
+        cpu->memptr = (uint16_t)(cpu->de + 1);       /* LD A,(DE) */
+        z80_jit_and(cpu, m);
+        z80_jit_cp(cpu, lo);
+        cpu->memptr = pc_exit;                         /* JP C,exit is evaluated */
+        if (cpu->f & Z80_FLAG_C) { executed += 4; break; }
+        z80_jit_cp(cpu, sen);
+        if (cpu->f & Z80_FLAG_Z) { executed += 6; break; }   /* JP Z,exit: memptr already exit */
+        cpu->mem[cpu->hl] = cpu->a;
+        cpu->hl++;
+        cpu->de++;
+        cpu->b++;
+        cpu->f = (uint8_t)((cpu->f & Z80_FLAG_C) | z80_f_tables[FT_INC + cpu->b]);
+        cpu->c--;
+        cpu->f = (uint8_t)((cpu->f & Z80_FLAG_C) | z80_f_tables[FT_DEC + cpu->c]);
+        cpu->memptr = pc_head;                         /* JP NZ,head is evaluated */
+        executed += 12;
+        if (cpu->c == 0) break;
+    }
+    cpu->q = 0;                                        /* every exit is through a JP */
+    /* The block counted its 12 instructions once; add what actually ran. */
+    cpu->insn_count = (uint64_t)((int64_t)cpu->insn_count + executed - 12);
+    smc_sweep_forward(cpu, dst0, (uint16_t)(cpu->hl - dst0));
+}

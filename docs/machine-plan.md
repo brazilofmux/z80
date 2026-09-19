@@ -336,9 +336,10 @@ with the skipped instructions added to the count (tests/loop.com under
 byte-copy and fill loops (`LD A,(HL); LD (DE),A; INC HL; INC DE; DEC r;
 JP NZ` and `LD (HL),A; INC HL; DEC r; JP NZ`) are folded the same way
 through helpers with the LDIR-style SMC sweep — exact, but only ~4% of
-this workload. What remains is the filtered-copy search loop at
-5771-57A1 (~7.5%, early exits on control characters — app-specific)
-and a long diffuse tail: WordStar's display refresh, the DRI BDOS, line
+this workload. The filtered-copy loop at 5771-57A1 (mask, bound
+check, sentinel check, copy, count; three exits) is folded too, matched
+by shape with its three immediates as parameters: **4.8 BIPS**. What
+remains is a long diffuse tail: WordStar's display refresh, the DRI BDOS, line
 management. `Z80_PROFILE=1 -i` and `-d`'s `[fold]` lines are the tools.
 The whole replace session verifies under strict -V; zexdoc -V still
 passes. x86-64 needs the three translator additions (ports, countdown,

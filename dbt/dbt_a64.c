@@ -2100,6 +2100,52 @@ static void emit_copyfill(emit_t *e, int is_fill, uint32_t spec, uint16_t loop_p
     emit_ldrb_imm(e, R_F,  R_CPU, OFF_F);
 }
 
+/* The filtered-copy loop (see z80_jit_loop_filtercopy): twelve ops with
+ * fixed registers, three immediates, and all three exits at the byte
+ * after the backward JP NZ. Returns 12 on a match. */
+static int filtercopy_kind(const z80_decoded *decs, const uint16_t *pc_afters,
+                           uint32_t i, uint32_t n_ops, uint32_t *spec) {
+    if (i + 12 > n_ops) return 0;
+    const z80_decoded *d = decs + i;
+    for (int k = 0; k < 12; k++) if (d[k].prefix == 0xDD || d[k].prefix == 0xFD) return 0;
+    uint16_t head = (uint16_t)(pc_afters[i] - d[0].bytes);
+    uint16_t exit = pc_afters[i + 11];
+    if (!(d[0].type == Z80_OP_LD_A_DE &&
+          d[1].type == Z80_OP_AND_A_N &&
+          d[2].type == Z80_OP_CP_A_N &&
+          d[3].type == Z80_OP_JP_CC_NN && d[3].cc == 3 && d[3].imm16 == exit &&      /* JP C */
+          d[4].type == Z80_OP_CP_A_N &&
+          d[5].type == Z80_OP_JP_CC_NN && d[5].cc == 1 && d[5].imm16 == exit &&      /* JP Z */
+          d[6].type == Z80_OP_LD_R_R && d[6].reg1 == 6 && d[6].reg2 == 7 &&          /* LD (HL),A */
+          d[7].type == Z80_OP_INC_RR && d[7].reg1 == 2 &&
+          d[8].type == Z80_OP_INC_RR && d[8].reg1 == 1 &&
+          d[9].type == Z80_OP_INC_R && d[9].reg1 == 0 &&                             /* INC B */
+          d[10].type == Z80_OP_DEC_R && d[10].reg1 == 1 &&                           /* DEC C */
+          d[11].type == Z80_OP_JP_CC_NN && d[11].cc == 0 && d[11].imm16 == head))    /* JP NZ,head */
+        return 0;
+    *spec = (uint32_t)d[1].imm8 | ((uint32_t)d[2].imm8 << 8) | ((uint32_t)d[4].imm8 << 16);
+    return 12;
+}
+
+static void emit_filtercopy(emit_t *e, uint32_t spec, uint16_t head, uint16_t exit) {
+    emit_strh_imm(e, R_BC, R_CPU, OFF_BC);
+    emit_strh_imm(e, R_DE, R_CPU, OFF_DE);
+    emit_strh_imm(e, R_HL, R_CPU, OFF_HL);
+    emit_strb_imm(e, R_A,  R_CPU, OFF_A);
+    emit_strb_imm(e, R_F,  R_CPU, OFF_F);
+    emit_mov_x64_x64(e, A64_W0, R_CPU);
+    emit_mov_x64_imm64(e, A64_W1, spec);
+    emit_movz_w32(e, A64_W2, head, 0);
+    emit_movz_w32(e, A64_W3, exit, 0);
+    emit_mov_x64_imm64(e, A64_W9, (uint64_t)(uintptr_t)z80_jit_loop_filtercopy);
+    emit_blr(e, A64_W9);
+    emit_ldrh_imm(e, R_BC, R_CPU, OFF_BC);
+    emit_ldrh_imm(e, R_DE, R_CPU, OFF_DE);
+    emit_ldrh_imm(e, R_HL, R_CPU, OFF_HL);
+    emit_ldrb_imm(e, R_A,  R_CPU, OFF_A);
+    emit_ldrb_imm(e, R_F,  R_CPU, OFF_F);
+}
+
 static void emit_countdown(emit_t *e, int kind, int reg, uint16_t loop_pc) {
     /* W2 = r (canonical), W9 = iterations - 1 = (r - 1) & 0xFF */
     a64_reg_t v = emit_read_r8(e, A64_W2, reg, 0);
@@ -2236,6 +2282,18 @@ uint8_t *dbt_translate_block(z80_dbt_t *dbt, uint16_t guest_pc) {
     for (uint32_t i = 0; i < n_ops; i++) {
         const z80_decoded *dec = &decs[i];
 
+        {
+            uint32_t fspec;
+            if (filtercopy_kind(decs, pc_afters, i, n_ops, &fspec)) {
+                dbt->loops_folded++;
+                if (cpm_debug) fprintf(stderr, "[fold] filtered copy loop at %04X\n", (uint16_t)(pc_afters[i] - dec->bytes));
+                emit_filtercopy(&e, fspec, (uint16_t)(pc_afters[i] - dec->bytes), pc_afters[i + 11]);
+                q_mode = Q_CLEAR;
+                prev_q = 0;
+                i += 11;
+                continue;
+            }
+        }
         {
             uint32_t spec; int is_fill;
             int len = copyfill_kind(decs, pc_afters, i, n_ops, &spec, &is_fill);

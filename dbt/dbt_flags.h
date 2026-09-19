@@ -85,6 +85,14 @@ void z80_jit_daa(z80_cpu_t *cpu);
 void z80_jit_loop_copy(z80_cpu_t *cpu, uint32_t spec, uint16_t pc);
 void z80_jit_loop_fill(z80_cpu_t *cpu, uint32_t spec, uint16_t pc);
 
+/* Filtered copy loop (WordStar's text-scan shape, constants parameterised):
+ *   LD A,(DE); AND m; CP lo; JP C,exit; CP s; JP Z,exit;
+ *   LD (HL),A; INC HL; INC DE; INC B; DEC C; JP NZ,head        exit = after JP NZ
+ * spec = m | lo << 8 | s << 16. Runs the iterations in C with the same
+ * flag rules as the interpreter, leaves the registers, F, memptr and
+ * insn_count exactly as the loop would have. */
+void z80_jit_loop_filtercopy(z80_cpu_t *cpu, uint32_t spec, uint16_t pc_head, uint16_t pc_exit);
+
 uint8_t z80_jit_port_in(z80_cpu_t *cpu, uint8_t port, uint8_t high);
 void    z80_jit_port_out(z80_cpu_t *cpu, uint8_t port, uint8_t high, uint8_t val);
 
