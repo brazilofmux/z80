@@ -10,13 +10,15 @@ No good reason. Maximum vibes.
 
 Single core, JIT unless noted:
 
-| Workload | M5 Max MacBook | Xeon 8259CL VM (x86-64) | Raspberry Pi 4 |
-|----------|----------------|-------------------------|----------------|
-| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** | **1.78 BIPS** | **532 MIPS** |
-| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** | **1.3 BIPS** | **0.47 BIPS** |
-| Same workloads, reference interpreter | ~230 MIPS | ~70 MIPS | ~24 MIPS |
+| Workload | M5 Max MacBook | M5 Max, x86-64 build under Rosetta 2 | Xeon 8259CL VM (x86-64) | Raspberry Pi 4 |
+|----------|----------------|--------------------------------------|-------------------------|----------------|
+| MS COBOL 4.65 benchmark (SQUARO, 1.6B insns of real CP/M code) | **4.3 BIPS** | **3.15 BIPS** | **1.78 BIPS** | **532 MIPS** |
+| zexdoc flag exerciser (5.76B insns, self-modifying-code torture) | **~3.3 BIPS** | **0.17 BIPS** | **1.3 BIPS** | **0.47 BIPS** |
+| Same workloads, reference interpreter | ~230 MIPS | — | ~70 MIPS | ~24 MIPS |
 
 The Pi 4 (Cortex-A72 @ 1.5 GHz, Debian 11, GCC 10, Linux/aarch64) built from a clean clone with no source changes; zexdoc and zexall pass 67/67 under the JIT, and the full zexdoc run passes under `-V` lockstep verification in six minutes. No Mac required.
+
+The Rosetta column is the same M5 Max running the x86-64 *build* — the JIT emits x86-64, and Apple's Rosetta 2 translates that to arm64 underneath it — built with `arch -x86_64 make CC='clang -arch x86_64'`. It passes zexdoc and zexall 67/67 and the full zexdoc `-V` lockstep run (5.76B instructions, 115 s). SQUARO translates its 383 blocks once and then runs them, so Rosetta's own translation cost is paid once and it out-runs the Xeon VM (which says more about the VM's core than about Rosetta). zexdoc is the opposite case: it patches its test instruction 7.4 million times, every patch retranslates a Z80 block, and every retranslation rewrites a page of x86-64 that Rosetta then has to translate again — two JITs invalidating each other, 20× slower than native. A neat measurement of what self-modifying code costs a binary translator, taken with a second binary translator.
 
 The x86-64 column is a 4-vCPU cloud VM (Xeon Platinum 8259CL, 2.5 GHz base, Ubuntu 24.04, GCC 13) — a much slower core than the M5, and a hypervisor with no performance counters. Same clean tree, same 67/67 on zexdoc and zexall, and both full exercisers pass under `-V` lockstep in about two minutes each.
 
@@ -26,7 +28,7 @@ The JIT's interpreter-fallback rate on real workloads is ~0.02% — essentially 
 
 This is a **dynamic binary translator** (DBT) first, interpreter second. The interpreter is the golden reference; the translator is the monster. The big levers, in the order they landed:
 
-- **Pinned guest registers.** BC, DE, HL, SP, A, and F live permanently in host registers across translated blocks *and* across block-to-block chains — six AArch64 callee-saved registers, or ten of x86-64's fifteen GPRs (A and F sit in RCX/RDX, where the 8080-descended `LAHF` drops S/Z/H/C into exactly the Z80's bit positions, so the add/sub family builds its flags from the host's). `LD A,B` is one host instruction. `(HL)` accesses need no address load at all. Guest state only touches memory at JIT entry/exit and around the one remaining helper call (LDIR/LDDR).
+- **Pinned guest registers.** BC, DE, HL, SP, A, and F live permanently in host registers across translated blocks *and* across block-to-block chains — six AArch64 callee-saved registers, or ten of x86-64's fifteen GPRs (A and F sit in RCX/RDX, where the 8080-descended `LAHF` drops S/Z/H/C into exactly the Z80's bit positions, so the add/sub family builds its flags from the host's). `LD A,B` is one host instruction. `(HL)` accesses need no address load at all. Guest state only touches memory at JIT entry/exit and around the remaining helper calls — LDIR/LDDR on both backends, plus DAA on AArch64 (x86-64 does DAA as a table lookup; the table already sits in the AArch64 aux block too, so that one's a pending two-instruction win).
 - **Direct block linking.** Every statically-known control-flow edge — fall-through, `JP`, `JR`, `CALL`, and both arms of every conditional — is a patchable branch aimed directly at the target block's native code. A hot loop's back-edge is literally `TST; B.cond; B` into the next translation. Blocks never return to the dispatcher until they must.
 - **Superblocks.** Conditional branches don't end translation: the taken arm becomes an out-of-line side exit and the translator keeps going through the fall-through, so straight-line runs cross `JR cc` / `DJNZ` / `RET cc` without paying a block boundary. Length is capped in guest bytes because block span is also the self-modifying-code invalidation window — everything is a trade.
 - **Dead-flag elimination.** The Z80 sets flags on nearly every instruction; almost nobody looks at them. A backward liveness pass over each block computes, per instruction and per flag bit, which bits can actually be observed — and the emitters skip the rest. `ADD` before another `ADD` emits no flag code at all; `ADD` before `JR C` emits just the carry. What survives is assembled inline from result-indexed lookup tables plus a few identities (carry-recovery for H, sign-xor for V) — no helper calls, no runtime lazy-flag descriptors, all decided at translation time.

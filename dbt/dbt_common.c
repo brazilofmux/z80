@@ -41,6 +41,11 @@ int dbt_init(z80_dbt_t *dbt, z80_cpu_t *cpu) {
     /* JIT blocks index the flag tables through the pinned aux base (X24),
      * so keep a copy at aux offset 0. Helpers still use the global. */
     memcpy(dbt->jit_ftables, z80_f_tables, sizeof(z80_f_tables));
+    /* The DAA table lives in the pad between the flag tables and the code
+     * bitmap; keep it from ever growing into the bitmap. */
+    _Static_assert(FT_DAA >= sizeof(z80_f_tables)
+                   && FT_DAA + sizeof(z80_daa_table) <= 0x10000,
+                   "DAA table must fit between jit_ftables and code_bitmap");
     memcpy((uint8_t *)dbt->jit_ftables + FT_DAA, z80_daa_table, sizeof(z80_daa_table));
     dbt_cache_invalidate_all(dbt);
 

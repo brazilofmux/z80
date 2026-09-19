@@ -57,13 +57,26 @@ static uint8_t *mem_alloc_mirrored(void) {
     return base;
 }
 
+/* z80_mem_mirrored describes EVERY buffer this returns, and translated
+ * code bakes it in, so the mode is decided by the first allocation and
+ * never changes: once mirrored, a later caller that can't get a mirror
+ * gets NULL rather than a buffer the JIT would misuse; once plain, every
+ * buffer is plain. */
 uint8_t *z80_mem_alloc(void) {
-    uint8_t *m = mem_alloc_mirrored();
-    if (m) {
-        z80_mem_mirrored = 1;
-        return m;
+    static int mode_decided = 0;
+    uint8_t *m = NULL;
+
+    if (!mode_decided || z80_mem_mirrored) {
+        m = mem_alloc_mirrored();
+        if (m) {
+            z80_mem_mirrored = 1;
+            mode_decided = 1;
+            return m;
+        }
+        if (mode_decided) return NULL;   /* mirrored mode, no mirror: refuse */
     }
     z80_mem_mirrored = 0;
+    mode_decided = 1;
     m = malloc(Z80_MEM_SIZE + 4096);
     if (m) memset(m, 0, Z80_MEM_SIZE + 4096);
     return m;
