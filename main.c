@@ -208,6 +208,11 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* The script is opened before the chdir to the disk root below, so a
+     * relative --script path means what the shell meant. */
+    kaypro_kbd_init();
+    if (script && kaypro_kbd_script_load(script) != 0) return 1;
+
     const char *root_to_use = disk_root ? disk_root : (effective_root[0] ? effective_root : NULL);
 
     if (root_to_use) {
@@ -276,8 +281,7 @@ int main(int argc, char **argv) {
 
     enter_raw_mode();
     atexit(leave_raw_mode);
-    kaypro_kbd_init();
-    if (script && kaypro_kbd_script_load(script) != 0) return 1;
+    kaypro_kbd_attach(&cpu);
     if (kaypro_term) {
         kaypro_video_init(KAYPRO_MODEL_84);
         kaypro_video_enabled = 1;
@@ -369,6 +373,9 @@ int main(int argc, char **argv) {
     if (show_stats) {
         printf("\n--- stats ---\n");
         printf("Instructions: %llu\n", (unsigned long long)cpu.insn_count);
+        if (kaypro_term)
+            printf("Console polls: %llu (longest quiet run %u)\n",
+                   (unsigned long long)kaypro_kbd_polls(), kaypro_kbd_max_quiet_streak());
         if (used_jit) {
             printf("JIT:\n");
             dbt_print_stats(dbt, stdout);

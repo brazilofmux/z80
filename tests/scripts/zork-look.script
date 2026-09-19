@@ -1,0 +1,5 @@
+# Zork I smoke test: look, then quit. Run by tests/zork.sh.
+look\r~
+@dump zork-look.dump
+quit\ry\r
+@end

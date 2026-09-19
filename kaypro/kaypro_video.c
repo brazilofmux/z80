@@ -328,5 +328,17 @@ void kaypro_video_dump(FILE *f, int with_attrs) {
                 fputc("0123456789ABCDEF"[KV->cells[r][c].attr & 0xF], f);
             fputc('\n', f);
         }
+        /* Hex plane, only for rows holding something a text dump can't show. */
+        for (int r = 0; r < KV_ROWS; r++) {
+            int odd = 0;
+            for (int c = 0; c < KV_COLS; c++) {
+                uint8_t ch = KV->cells[r][c].ch;
+                if (ch < 0x20 || ch >= 0x7F) odd = 1;
+            }
+            if (!odd) continue;
+            fprintf(f, "\nrow %2d hex:", r);
+            for (int c = 0; c < KV_COLS; c++) fprintf(f, " %02X", KV->cells[r][c].ch);
+            fputc('\n', f);
+        }
     }
 }

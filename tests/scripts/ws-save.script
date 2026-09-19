@@ -1,0 +1,14 @@
+# WordStar 3.00 (installed for ADM-3A) smoke test: create TEST.TXT, type
+# two lines, save with ^KD. Run by tests/wordstar.sh.
+@wait-idle
+D
+@wait-idle
+TEST.TXT\r
+@wait-idle
+@dump ws-editor.dump
+Hello from the 10 BIPS future.\rSecond line.\r
+@wait-idle
+\^K\^D
+@wait-idle
+@dump ws-after-save.dump
+@end

@@ -16,11 +16,19 @@
  *                       own newline is NOT sent
  *   ~                   inline: wait until the guest is idle (see below)
  *   @wait-idle [N]      wait until the guest has polled for input N
- *                       times (default 20) with nothing to give it, or
- *                       has blocked in a read — i.e. it wants a key
+ *                       times in a row (default 20000) with nothing to
+ *                       give it and no console output in between, or
+ *                       has blocked in a read — i.e. it is done drawing
+ *                       and wants a key. The default outlasts message
+ *                       delays: WordStar paces "NEW FILE" with ~16500
+ *                       silent CONST polls, and a quiet run that long
+ *                       costs a few milliseconds at guest speed
  *   @sleep MS           wall-clock pause
- *   @dump FILE          write the screen (kaypro_video_dump) now; "-" is
- *                       stdout
+ *   @dump FILE [attrs]  write the screen (kaypro_video_dump) now; "-" is
+ *                       stdout; a relative FILE is placed next to the
+ *                       script; "attrs" adds the attribute and hex planes
+ *   @mem ADDR LEN       hex-dump LEN bytes of guest memory at ADDR (hex)
+ *                       to stdout — a debugging aid for scripted runs
  *   @end                stop here (implicit at end of file)
  *
  * When the script runs out and the guest asks for another key, the run
@@ -40,10 +48,16 @@
 #include <stdint.h>
 
 #define KBD_END (-1)
-#define KBD_IDLE_POLLS 64
+#define KBD_IDLE_POLLS 64          /* host terminal: sleep after this many quiet polls */
+#define KBD_IDLE_END_POLLS 40000   /* script exhausted: end after this many quiet polls */
+#define KBD_WAIT_IDLE_DEFAULT 20000 /* @wait-idle / ~ with no count */
 
 /* Host-terminal source (the default). */
 void kaypro_kbd_init(void);
+
+/* The cpu whose memory @mem dumps (main sets it once). */
+struct z80_cpu;
+void kaypro_kbd_attach(struct z80_cpu *cpu);
 
 /* Load a script and make it the source. Returns 0 on success. */
 int  kaypro_kbd_script_load(const char *path);
@@ -58,6 +72,7 @@ void kaypro_kbd_note_activity(void);
 
 /* Bookkeeping the tests and the HUD look at. */
 uint64_t kaypro_kbd_polls(void);
+unsigned kaypro_kbd_max_quiet_streak(void);   /* longest quiet poll run (tuning @wait-idle) */
 uint64_t kaypro_kbd_reads(void);
 
 #endif /* KAYPRO_KBD_H */

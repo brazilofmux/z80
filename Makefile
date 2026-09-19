@@ -66,7 +66,7 @@ clean:
 	rm -f tools/mkhello tools/mkblock
 	rm -f tests/*.com tests/*.bin
 
-test: test-video test-render test-guest
+test: test-video test-render test-guest test-apps
 
 # Guest-side tests: the generated .COMs under the interpreter, the JIT,
 # and lockstep verify. ports.com is the Phase 0 acceptance test (every
@@ -87,6 +87,12 @@ test-guest: $(TARGET) $(GUEST_TESTS)
 	        *) echo "$$t.com -V: ok" ;; esac; \
 	done; \
 	[ $$fail -eq 0 ] && echo "test-guest: all pass" || { echo "test-guest: FAILURES"; exit 1; }
+
+# Headless application smoke tests (skip when the software is not in disks/).
+.PHONY: test-apps
+test-apps: $(TARGET)
+	@tests/zork.sh jit
+	@tests/wordstar.sh jit
 
 # Host-side unit test of the Kaypro screen model (no Z80 involved).
 .PHONY: test-video
