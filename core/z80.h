@@ -355,9 +355,6 @@ int  z80_load_com(z80_cpu_t *cpu, const char *path);
 /* One instruction step (for the interpreter and for debugging) */
 int  z80_step(z80_cpu_t *cpu);
 
-/* Run until a certain condition (used by interp and by DBT run loop) */
-void z80_run(z80_cpu_t *cpu);
-
 /* Helper: compute the real F byte from lazy state (DBT calls this when needed) */
 uint8_t z80_materialize_flags(z80_cpu_t *cpu);
 

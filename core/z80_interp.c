@@ -1490,21 +1490,3 @@ int z80_step(z80_cpu_t *cpu) {
     cpu->insn_count++;
     return 0;
 }
-
-/* ========================================================================
- * Run loop (used by both interp and future DBT)
- * ===================================================================== */
-void z80_run(z80_cpu_t *cpu) {
-    /* In pure interpreter mode we just keep stepping until something stops us.
-       Real termination will be via BDOS function 0 (warm boot) or a special
-       host call we install at 0x0000/0x0005. */
-    for (;;) {
-        if (z80_step(cpu) != 0)
-            break;
-        /* Crude safety: if we execute an absurd number of instructions, stop */
-        if (cpu->insn_count > 100000000ULL) {
-            fprintf(stderr, "z80_run: safety limit hit (100M instructions)\n");
-            break;
-        }
-    }
-}

@@ -177,10 +177,16 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
 
     default:
         /* Many real .COMs call functions we don't care about yet (Reset, Get DPB,
-         * Login Vector, Read Buffer, etc.). Log it but don't kill the program. */
-        fprintf(stderr, "[BDOS] unimplemented function %d (C=%d) DE=%04X — continuing\n",
-                func, func, cpu->de);
+         * Login Vector, Read Buffer, etc.). Log it but don't kill the program.
+         * Above 40 is CP/M 3 / MP/M territory: a 2.2 BDOS ignores those and
+         * programs probe them on purpose (BBC BASIC 5 calls 45), so only -d
+         * reports them. Return HL = 0 (A = L, B = H) like DRI's BDOS. */
+        if (func <= 40 || cpm_debug)
+            fprintf(stderr, "[BDOS] unimplemented function %d (C=%d) DE=%04X — continuing\n",
+                    func, func, cpu->de);
+        cpu->hl = 0;
         cpu->a = 0;
+        cpu->b = 0;
         return 1;   /* continue execution */
     }
 }

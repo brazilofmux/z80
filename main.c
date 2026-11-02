@@ -197,9 +197,8 @@ static void usage(const char *prog) {
     printf("  --list FILE         Append LST: output to FILE (native CP/M only)\n");
     printf("  -h       This help\n\n");
     printf("Example:\n");
-    printf("  %s tests/hello.com\n\n", prog);
-    printf("This is the very first bring-up of the monster.\n");
-    printf("Only a handful of Z80 opcodes + BDOS 9 are implemented.\n");
+    printf("  %s tests/hello.com\n", prog);
+    printf("  %s -j -A disk.dsk    boot CP/M 2.2 from an image (tools/mkdsk makes one)\n", prog);
 }
 
 int main(int argc, char **argv) {
