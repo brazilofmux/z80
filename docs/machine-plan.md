@@ -236,17 +236,20 @@ links SQUARO under the native BDOS. `^]` leaves an interactive session.
 Still to do here: real system tracks on the image (the loader takes
 `system.bin` from the host); CP/M 3 is out of scope as planned.
 `--list` to a printer file works (WordStar's Teletype driver output
-checked against its disk-file output, 2026-09-19). One open question:
-type-ahead into a running MS-COBOL program (a whole job piped into
-stdin, so the ACCEPTs find their lines already queued) corrupted the
-program's WORKING-STORAGE, while the same lines paced by `@wait-idle`
-were fine. Probably the MS-COBOL run-time's own console handling, but
-worth a look with `-V` before blaming the guest. (2026-11-01: piped
-stdin is now released a line at a time, each line once the guest is
-idle — the `@wait-idle` rule — because programs that poll the console
-while printing ate the queued input: BBC BASIC's Escape check, and the
-CCP itself, which turned piped `DIR` `HELLO` into `ELLO?`. Likely the
-same cause; not yet re-run against MS-COBOL.)
+checked against its disk-file output, 2026-09-19). Type-ahead (closed
+2026-11-01): a whole MS-COBOL job piped into stdin, so the ACCEPTs and
+the CCP find their lines already queued, used to go wrong while the
+same lines paced by `@wait-idle` were fine. The cause was ours:
+programs that poll the console while printing ate the queued input —
+the CCP turned piped `GL022` into `L022` (and `DIR` `HELLO` into
+`ELLO?`), BBC BASIC lost lines to its per-character Escape check.
+Piped stdin is now released a line at a time, each line once the guest
+is idle (the `@wait-idle` rule). Checked on the majesty reports with
+the COBOL sort (XSORT) and every wait removed: the chart job (4
+reports) and the October journal (2 reports, 147 G instructions)
+come out byte-identical to `reports_cobol/`; the emulator before the
+fix got the chart job wrong. The WORKING-STORAGE corruption first
+reported was not reproduced either way.
 
 SMC note (2026-09-19): MS-COBOL's generated code patches a few of
 its own operand bytes millions of times a job. Each such store swept
