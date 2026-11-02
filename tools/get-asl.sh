@@ -16,7 +16,10 @@ cd "$WORK"/asl-*
 case "$(uname -s)-$(uname -m)" in
     Darwin-arm64)  cp Makefile.def-samples/Makefile.def-arm-osx Makefile.def ;;
     Darwin-x86_64) cp Makefile.def-samples/Makefile.def-i386-osx Makefile.def ;;
-    Linux-x86_64)  cp Makefile.def-samples/Makefile.def-i386-unknown-linux2.x.x Makefile.def ;;
+    # Not the i386 sample: its -march=i586 is refused by an x86-64 gcc.
+    Linux-x86_64)  if [ -f Makefile.def-samples/Makefile.def-x86_64-unknown-linux ]; then
+                       cp Makefile.def-samples/Makefile.def-x86_64-unknown-linux Makefile.def
+                   else cp Makefile.def.tmpl Makefile.def; fi ;;
     *)             cp Makefile.def.tmpl Makefile.def ;;
 esac
 make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" binaries > build.log 2>&1 || { tail -20 build.log; exit 1; }

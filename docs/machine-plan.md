@@ -244,12 +244,16 @@ programs that poll the console while printing ate the queued input —
 the CCP turned piped `GL022` into `L022` (and `DIR` `HELLO` into
 `ELLO?`), BBC BASIC lost lines to its per-character Escape check.
 Piped stdin is now released a line at a time, each line once the guest
-is idle (the `@wait-idle` rule). Checked on the majesty reports with
-the COBOL sort (XSORT) and every wait removed: the chart job (4
-reports) and the October journal (2 reports, 147 G instructions)
-come out byte-identical to `reports_cobol/`; the emulator before the
-fix got the chart job wrong. The WORKING-STORAGE corruption first
-reported was not reproduced either way.
+is idle (the `@wait-idle` rule). A second fault surfaced only with the
+whole month-end piped: the console queue holds 255 bytes but a host
+read took 256, and the overflow byte was dropped — every 256th byte of
+piped input (`D:LNACCTS2.DAT` arrived as `D:LACCTS2.DAT`). Host bytes
+now wait in their own buffer until the queue has room (`kbd_test`
+covers it). With both fixes the full majesty month-end, twelve
+reports and 34 G instructions, piped with every wait removed, is
+byte-identical to `reports_cobol/` — the same as the paced script.
+The WORKING-STORAGE corruption first reported was never reproduced;
+both faults above lose or misplace input, which fits it.
 
 SMC note (2026-09-19): MS-COBOL's generated code patches a few of
 its own operand bytes millions of times a job. Each such store swept

@@ -238,18 +238,59 @@ static int stdin_readable(long wait_us) {
  * waits a few milliseconds for the rest of its sequence; a lone ESC
  * pressed by hand arrives alone. Returns 1 if something was queued, 0
  * if nothing was available or every key was unmapped, -1 on EOF. */
+static uint8_t hbuf[256];                /* host bytes read but not yet queued */
+static size_t  hoff, hlen;
+
+static unsigned q_room(void) { return (q_tail + QSIZE - q_head - 1) % QSIZE; }
+
+/* Translate pending host bytes into the queue while a whole key's worth
+ * (up to 8 bytes) still fits; the rest waits in hbuf for the next call.
+ * The queue holds QSIZE-1 bytes and a read takes up to 256, so queueing
+ * a read whole dropped its last byte — every 256th byte of piped input. */
+static int host_drain(void) {
+    uint8_t *buf = hbuf + hoff;
+    size_t len = hlen - hoff;
+    int queued = 0;
+    size_t i = 0;
+    while (i < len && q_room() >= 8) {
+        size_t seqlen = 1;
+        if (buf[i] == 0x1D) {
+            /* ^] leaves the emulator, the way it leaves telnet: a native
+             * CP/M session has no other way out (the CCP never exits),
+             * and the atexit chain restores the terminal. */
+            fprintf(stderr, "\n[exit] ^] pressed\n");
+            exit(0);
+        }
+        if (buf[i] == 0x1B && i + 1 < len && (buf[i + 1] == '[' || buf[i + 1] == 'O')) {
+            /* CSI: parameters then a final byte 0x40..0x7E; SS3: one byte. */
+            seqlen = 2;
+            if (buf[i + 1] == 'O') { if (i + 2 < len) seqlen = 3; }
+            else while (i + seqlen < len) { uint8_t c = buf[i + seqlen++]; if (c >= 0x40 && c <= 0x7E) break; }
+        }
+        uint8_t out[8];
+        size_t k = kaypro_kbd_translate(buf + i, seqlen, out, sizeof out);
+        for (size_t j = 0; j < k; j++) q_push(out[j]);
+        if (k) queued = 1;
+        i += seqlen;
+    }
+    hoff += i;
+    if (hoff == hlen) hoff = hlen = 0;
+    return queued;
+}
+
 static int host_fetch(int block) {
+    if (hlen) return host_drain() ? 1 : 0;   /* finish the last read first */
     if (!stdin_readable(block ? -1 : 0)) return 0;
-    uint8_t buf[256];
-    ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+    uint8_t *buf = hbuf;
+    ssize_t n = read(STDIN_FILENO, buf, sizeof hbuf);
     if (n <= 0) return -1;               /* EOF or error */
     size_t len = (size_t)n;
     /* A sequence may have been cut by the read boundary: a trailing ESC,
      * ESC [ or ESC O gets a few milliseconds for the rest to arrive. */
-    if (len < sizeof buf &&
+    if (len < sizeof hbuf &&
         (buf[len - 1] == 0x1B ||
          (len >= 2 && buf[len - 2] == 0x1B && (buf[len - 1] == '[' || buf[len - 1] == 'O')))) {
-        while (len < sizeof buf && stdin_readable(20000)) {
+        while (len < sizeof hbuf && stdin_readable(20000)) {
             if (read(STDIN_FILENO, buf + len, 1) <= 0) break;
             len++;
             uint8_t c = buf[len - 1];
@@ -271,29 +312,9 @@ static int host_fetch(int block) {
         len = o;
         if (len == 0) return 0;
     }
-    int queued = 0;
-    for (size_t i = 0; i < len; ) {
-        size_t seqlen = 1;
-        if (buf[i] == 0x1D) {
-            /* ^] leaves the emulator, the way it leaves telnet: a native
-             * CP/M session has no other way out (the CCP never exits),
-             * and the atexit chain restores the terminal. */
-            fprintf(stderr, "\n[exit] ^] pressed\n");
-            exit(0);
-        }
-        if (buf[i] == 0x1B && i + 1 < len && (buf[i + 1] == '[' || buf[i + 1] == 'O')) {
-            /* CSI: parameters then a final byte 0x40..0x7E; SS3: one byte. */
-            seqlen = 2;
-            if (buf[i + 1] == 'O') { if (i + 2 < len) seqlen = 3; }
-            else while (i + seqlen < len) { uint8_t c = buf[i + seqlen++]; if (c >= 0x40 && c <= 0x7E) break; }
-        }
-        uint8_t out[8];
-        size_t k = kaypro_kbd_translate(buf + i, seqlen, out, sizeof out);
-        for (size_t j = 0; j < k; j++) q_push(out[j]);
-        if (k) queued = 1;
-        i += seqlen;
-    }
-    return queued ? 1 : 0;
+    hoff = 0;
+    hlen = len;
+    return host_drain() ? 1 : 0;
 }
 
 /* ---- script source ---------------------------------------------------- */
@@ -549,7 +570,7 @@ int kaypro_kbd_poll(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     long since_ns = (now.tv_sec - last_look.tv_sec) * 1000000000L + (now.tv_nsec - last_look.tv_nsec);
-    if (!stdin_eof && (since_ns >= 1000000L || since_ns < 0)) {
+    if (!stdin_eof && (hlen || since_ns >= 1000000L || since_ns < 0)) {
         last_look = now;
         int r = host_fetch(0);
         if (r == 1) { if (gated()) return 0; empty_polls = 0; return 1; }

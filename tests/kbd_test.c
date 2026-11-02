@@ -3,6 +3,7 @@
 #include "../kaypro/kaypro_kbd.h"
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static int failures = 0;
 static void expect(const char *name, const char *seq, size_t n, const char *want, size_t wn) {
@@ -19,7 +20,39 @@ static void expect(const char *name, const char *seq, size_t n, const char *want
 }
 #define EXPECT(name, seq, want) expect(name, seq, sizeof(seq) - 1, want, sizeof(want) - 1)
 
+/* Piped stdin: every byte of a long input reaches the guest, LF as CR.
+ * The queue holds 255 bytes and a host read takes 256; the 256th byte
+ * of each read used to be dropped (a month-end job lost an N and a CR). */
+static void piped_input(void) {
+    char in[2048], want[2048];
+    size_t n = 0, wn = 0;
+    for (int line = 0; n < 1600; line++) {
+        int k = snprintf(in + n, sizeof in - n, "LINE %03d ABCDEFGHIJKLMNOP\n", line);
+        memcpy(want + wn, in + n, (size_t)k - 1);
+        wn += (size_t)k - 1;
+        want[wn++] = '\r';
+        n += (size_t)k;
+    }
+    FILE *f = tmpfile();
+    if (!f || fwrite(in, 1, n, f) != n || fflush(f) != 0 || fseek(f, 0, SEEK_SET) != 0) {
+        failures++; fprintf(stderr, "FAIL piped: tmpfile\n"); return;
+    }
+    int saved = dup(STDIN_FILENO);
+    dup2(fileno(f), STDIN_FILENO);
+    kaypro_kbd_init();                             /* sees a non-tty stdin */
+    size_t bad = wn;
+    for (size_t i = 0; i < wn; i++) {
+        int c = kaypro_kbd_read();
+        if (c != (uint8_t)want[i]) { bad = i; break; }
+    }
+    if (bad != wn) { failures++; fprintf(stderr, "FAIL piped: byte %zu of %zu wrong or missing\n", bad, wn); }
+    dup2(saved, STDIN_FILENO);
+    close(saved);
+    fclose(f);
+}
+
 int main(void) {
+    piped_input();
     kaypro_kbd_keys_configure("");                 /* defaults */
     EXPECT("plain", "a", "a");
     EXPECT("cr", "\r", "\r");
