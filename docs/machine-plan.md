@@ -241,7 +241,12 @@ type-ahead into a running MS-COBOL program (a whole job piped into
 stdin, so the ACCEPTs find their lines already queued) corrupted the
 program's WORKING-STORAGE, while the same lines paced by `@wait-idle`
 were fine. Probably the MS-COBOL run-time's own console handling, but
-worth a look with `-V` before blaming the guest.
+worth a look with `-V` before blaming the guest. (2026-11-01: piped
+stdin is now released a line at a time, each line once the guest is
+idle — the `@wait-idle` rule — because programs that poll the console
+while printing ate the queued input: BBC BASIC's Escape check, and the
+CCP itself, which turned piped `DIR` `HELLO` into `ELLO?`. Likely the
+same cause; not yet re-run against MS-COBOL.)
 
 SMC note (2026-09-19): MS-COBOL's generated code patches a few of
 its own operand bytes millions of times a job. Each such store swept

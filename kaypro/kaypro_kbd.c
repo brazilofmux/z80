@@ -32,6 +32,20 @@ static unsigned empty_polls;             /* consecutive polls that found nothing
 static unsigned max_quiet_streak;        /* longest run of empty polls with no output between */
 static int scripted;
 
+/* Piped stdin (not a terminal, not a script): the whole input is ready
+ * at once, but a person types a line only after the prompt is up.
+ * Programs that poll the console while they print — BBC BASIC checks
+ * for Escape before every character with BDOS 6 — would otherwise eat
+ * the type-ahead as it scrolls past. So queued bytes are released one
+ * line at a time: the gate opens when the guest is idle (a blocking
+ * read or HALT, or KBD_IDLE_POLLS quiet polls with no console output
+ * between them, the same test as a script's @wait-idle) and closes
+ * after the guest takes a CR or LF. */
+static int      piped;
+static int      gate_open;
+static unsigned gate_polls;              /* quiet polls while gated */
+static int      stdin_eof;               /* a poll saw end of piped input */
+
 uint64_t kaypro_kbd_polls(void) { return n_polls; }
 unsigned kaypro_kbd_max_quiet_streak(void) { return max_quiet_streak; }
 uint64_t kaypro_kbd_reads(void) { return n_reads; }
@@ -45,6 +59,10 @@ void kaypro_kbd_init(void) {
     n_polls = n_reads = 0;
     empty_polls = 0;
     scripted = 0;
+    piped = !isatty(STDIN_FILENO);
+    gate_open = 0;
+    gate_polls = 0;
+    stdin_eof = 0;
     keymap_defaults();
     if (kaypro_kbd_keys_configure(getenv("Z80_KEYS")) != 0)
         fprintf(stderr, "Z80_KEYS: bad key spec ignored\n");
@@ -238,6 +256,21 @@ static int host_fetch(int block) {
             if (c >= 0x40 && c <= 0x7E && c != '[') break;
         }
     }
+    if (piped) {
+        /* A text file's line ends are LF or CR LF; Return on a terminal
+         * is CR, and CR is what CP/M's line input and most programs end
+         * a line on (DRI's BDOS 10 and BBC BASIC ignore LF). */
+        static int last_cr;
+        size_t o = 0;
+        for (size_t i = 0; i < len; i++) {
+            uint8_t c = buf[i];
+            if (c == '\n') { if (last_cr) { last_cr = 0; continue; } c = '\r'; last_cr = 0; }
+            else last_cr = (c == '\r');
+            buf[o++] = c;
+        }
+        len = o;
+        if (len == 0) return 0;
+    }
     int queued = 0;
     for (size_t i = 0; i < len; ) {
         size_t seqlen = 1;
@@ -287,7 +320,7 @@ static long     polls_since_read;
 /* Console output: the guest is not idle. Restarts a pending wait-idle,
  * because "idle" means no output between polls — WordStar repaints a
  * chunk at a time between CONST polls and only stops when it is done. */
-void     kaypro_kbd_note_activity(void) { empty_polls = 0; if (idle_armed) idle_target = idle_wanted; }
+void     kaypro_kbd_note_activity(void) { empty_polls = 0; gate_polls = 0; if (idle_armed) idle_target = idle_wanted; }
 
 static step_t *add_step(step_kind k) {
     if (n_steps == cap_steps) {
@@ -465,10 +498,24 @@ static int paced_out(void) {
     return 1;
 }
 
+/* Piped-input line gate (see `piped`): 1 if a queued byte must be
+ * withheld from this poll. */
+static int gated(void) {
+    if (!piped || scripted || gate_open) return 0;
+    if (++gate_polls >= KBD_IDLE_POLLS) { gate_open = 1; return 0; }
+    return 1;
+}
+
+static uint8_t pop_key(void) {
+    uint8_t c = q_pop();
+    if (piped && c == '\r') { gate_open = 0; gate_polls = 0; }
+    return c;
+}
+
 int kaypro_kbd_poll(void) {
     n_polls++;
     if (!q_empty()) {
-        if (paced_out()) return 0;
+        if (paced_out() || gated()) return 0;
         empty_polls = 0;
         return 1;
     }
@@ -502,12 +549,26 @@ int kaypro_kbd_poll(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     long since_ns = (now.tv_sec - last_look.tv_sec) * 1000000000L + (now.tv_nsec - last_look.tv_nsec);
-    if (since_ns >= 1000000L || since_ns < 0) {
+    if (!stdin_eof && (since_ns >= 1000000L || since_ns < 0)) {
         last_look = now;
-        if (host_fetch(0) == 1) { empty_polls = 0; return 1; }
+        int r = host_fetch(0);
+        if (r == 1) { if (gated()) return 0; empty_polls = 0; return 1; }
+        if (r < 0 && piped) stdin_eof = 1;
     }
-    if (++empty_polls >= KBD_IDLE_POLLS) usleep(1000);
+    ++empty_polls;
     if (empty_polls > max_quiet_streak) max_quiet_streak = empty_polls;
+    if (stdin_eof) {
+        /* Piped input used up and the guest only polls (a blocking read
+         * gets ^Z instead): nothing more will arrive. End the session,
+         * the way a script that runs out does. No idle sleep here — it
+         * would stretch the wait to tens of seconds. */
+        if (empty_polls >= KBD_IDLE_END_POLLS) {
+            fprintf(stderr, "[exit] stdin closed, guest polling for input\n");
+            exit(0);
+        }
+        return 0;
+    }
+    if (empty_polls >= KBD_IDLE_POLLS) usleep(1000);
     return 0;
 }
 
@@ -515,7 +576,8 @@ int kaypro_kbd_read(void) {
     n_reads++;
     empty_polls = 0;
     polls_since_read = 0;
-    if (!q_empty()) return q_pop();
+    gate_open = 1;                       /* blocking for a key: the guest is at its prompt */
+    if (!q_empty()) return pop_key();
     if (scripted) {
         int r = script_advance(1);
         if (r == 1) return q_pop();
@@ -523,7 +585,7 @@ int kaypro_kbd_read(void) {
     }
     for (;;) {
         int r = host_fetch(1);
-        if (r == 1) return q_pop();
+        if (r == 1) return pop_key();
         if (r < 0) {
             /* stdin EOF: hand the guest CP/M's ^Z a few times (programs
              * reading piped input end on it), then end the session — a
@@ -540,6 +602,7 @@ int kaypro_kbd_read(void) {
 }
 
 void kaypro_kbd_wait(void) {
+    gate_open = 1;                       /* HALT: idle by definition */
     if (!q_empty()) return;
     if (scripted) {
         if (script_advance(1) < 0) {

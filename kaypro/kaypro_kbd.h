@@ -5,7 +5,10 @@
  *   read  — take one, blocking if none (BIOS CONIN, BDOS 1/6/10)
  *   wait  — block until poll would succeed (HALT)
  * Two sources implement those: the host terminal (raw stdin, with a
- * one-byte read-ahead so poll-then-read never races), and a script
+ * one-byte read-ahead so poll-then-read never races; when stdin is a
+ * pipe or file, LF / CR LF become CR and the input is released a line
+ * at a time, each line once the guest is idle, so programs that poll
+ * while printing don't eat the type-ahead), and a script
  * file for headless runs. A script is a list of keystrokes with
  * synchronisation points, so a test can type into WordStar at guest
  * speed and know when the program has caught up:
