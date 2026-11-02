@@ -148,6 +148,12 @@ typedef struct z80_cpu {
 
     /* Statistics / profiling (optional, enabled with -s) */
     uint64_t insn_count;
+
+    /* R is synthesized, not counted per M1 fetch: its low 7 bits read as
+     * r + (insn_count - r_epoch), so translated code never touches it.
+     * LD R,A re-anchors r_epoch. One step per instruction rather than per
+     * opcode fetch — good enough for the "LD A,R as a random seed" idiom. */
+    uint64_t r_epoch;
     uint64_t block_count;
     uint64_t cache_hits;
     uint64_t cache_misses;
@@ -300,6 +306,16 @@ typedef enum {
     Z80_OP_OUT_C_R,     /* ED 41/49/.../79  OUT (C),r */
     Z80_OP_INI,  Z80_OP_IND,  Z80_OP_INIR, Z80_OP_INDR,
     Z80_OP_OUTI, Z80_OP_OUTD, Z80_OP_OTIR, Z80_OP_OTDR,
+
+    /* ED-prefix interrupt / system column. No interrupt source is
+     * modelled yet, so these only record state; a program that sets up
+     * IM 2 and enables interrupts simply never receives one. */
+    Z80_OP_IM,          /* ED 46/4E/56/5E/66/6E/76/7E  imm8 = mode 0/1/2 */
+    Z80_OP_RETN,        /* ED 45/55/.../7D  RETN; ED 4D is RETI (same effect) */
+    Z80_OP_LD_I_A,      /* ED 47 */
+    Z80_OP_LD_R_A,      /* ED 4F */
+    Z80_OP_LD_A_I,      /* ED 57 */
+    Z80_OP_LD_A_R,      /* ED 5F */
 } z80_op_type;
 
 typedef struct {

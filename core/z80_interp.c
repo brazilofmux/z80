@@ -630,6 +630,47 @@ int z80_step(z80_cpu_t *cpu) {
         cpu->iff1 = 1; cpu->iff2 = 1;
         break;
 
+    case Z80_OP_IM:
+        cpu->im = dec.imm8;
+        break;
+
+    case Z80_OP_RETN:
+        /* RETN and RETI both restore IFF1 from IFF2 on real silicon. */
+        cpu->pc = cpu->mem[cpu->sp] | (cpu->mem[(cpu->sp + 1) & 0xFFFF] << 8);
+        cpu->sp = (cpu->sp + 2) & 0xFFFF;
+        cpu->memptr = cpu->pc;
+        cpu->iff1 = cpu->iff2;
+        break;
+
+    case Z80_OP_LD_I_A:
+        cpu->i = cpu->a;
+        break;
+
+    case Z80_OP_LD_R_A:
+        cpu->r = cpu->a;
+        cpu->r_epoch = cpu->insn_count;
+        break;
+
+    case Z80_OP_LD_A_I:
+    case Z80_OP_LD_A_R:
+        {
+            uint8_t v;
+            if (dec.type == Z80_OP_LD_A_I) {
+                v = cpu->i;
+            } else {
+                v = (uint8_t)((cpu->r & 0x80)
+                    | ((cpu->r + (cpu->insn_count - cpu->r_epoch)) & 0x7F));
+            }
+            cpu->a = v;
+            /* S Z from v, H=N=0, P/V = IFF2, C preserved, XY from v. */
+            uint8_t f = (cpu->f & Z80_FLAG_C) | (v & (Z80_FLAG_S | Z80_FLAG_35));
+            if (v == 0) f |= Z80_FLAG_Z;
+            if (cpu->iff2) f |= Z80_FLAG_PV;
+            cpu->f = f;
+            cpu->q = 1;
+        }
+        break;
+
     case Z80_OP_HALT:
         /* No interrupt sources yet: HALT waits until console input is
          * available (the only wake-up event a Kaypro program idles on),

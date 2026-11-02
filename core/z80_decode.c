@@ -111,7 +111,22 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
             out->imm16 = mem[(pc+1)&0xFFFF] | (mem[(pc+2)&0xFFFF] << 8);
             out->bytes += 2;
             return out->bytes;
-        case 0x44: out->type = Z80_OP_NEG;  return out->bytes;
+        case 0x44: case 0x4C: case 0x54: case 0x5C:   /* NEG + undocumented copies */
+        case 0x64: case 0x6C: case 0x74: case 0x7C:
+            out->type = Z80_OP_NEG;  return out->bytes;
+        case 0x45: case 0x4D: case 0x55: case 0x5D:   /* RETN; 4D = RETI */
+        case 0x65: case 0x6D: case 0x75: case 0x7D:
+            out->type = Z80_OP_RETN; return out->bytes;
+        case 0x46: case 0x4E: case 0x56: case 0x5E:   /* IM 0/0/1/2 ... */
+        case 0x66: case 0x6E: case 0x76: case 0x7E: {
+            static const uint8_t mode[4] = { 0, 0, 1, 2 };  /* 4E/6E: IM 0/1, acts as 0 */
+            out->type = Z80_OP_IM; out->imm8 = mode[(op >> 3) & 3];
+            return out->bytes;
+        }
+        case 0x47: out->type = Z80_OP_LD_I_A; return out->bytes;
+        case 0x4F: out->type = Z80_OP_LD_R_A; return out->bytes;
+        case 0x57: out->type = Z80_OP_LD_A_I; return out->bytes;
+        case 0x5F: out->type = Z80_OP_LD_A_R; return out->bytes;
         case 0x67: out->type = Z80_OP_RRD;  return out->bytes;
         case 0x6F: out->type = Z80_OP_RLD;  return out->bytes;
         case 0xA0: out->type = Z80_OP_LDI;  return out->bytes;
@@ -140,7 +155,9 @@ int z80_decode_one(const uint8_t *mem, uint16_t pc, z80_decoded *out) {
             if ((op & 0xC7) == 0x41) {
                 out->type = Z80_OP_OUT_C_R; out->reg1 = (op >> 3) & 7; return out->bytes;
             }
-            out->type = Z80_OP_UNKNOWN;
+            /* Everything else in the ED page (00-3F, 77, 7F, 80-9F, the
+             * holes in A0-BF, C0-FF) is an 8-T-state no-op on silicon. */
+            out->type = Z80_OP_NOP;
             return out->bytes;
         }
     }
@@ -587,6 +604,12 @@ const char *z80_op_name(z80_op_type t) {
     case Z80_OP_INIR: return "INIR"; case Z80_OP_INDR: return "INDR";
     case Z80_OP_OUTI: return "OUTI"; case Z80_OP_OUTD: return "OUTD";
     case Z80_OP_OTIR: return "OTIR"; case Z80_OP_OTDR: return "OTDR";
+    case Z80_OP_IM:     return "IM n";
+    case Z80_OP_RETN:   return "RETN/RETI";
+    case Z80_OP_LD_I_A: return "LD I,A";
+    case Z80_OP_LD_R_A: return "LD R,A";
+    case Z80_OP_LD_A_I: return "LD A,I";
+    case Z80_OP_LD_A_R: return "LD A,R";
     default: return "???";
     }
 }

@@ -71,7 +71,7 @@ test: test-video test-render test-kbd test-guest test-sort test-apps
 # Guest-side tests: the generated .COMs under the interpreter, the JIT,
 # and lockstep verify. ports.com is the Phase 0 acceptance test (every
 # port op traps, so all three modes exercise the same interpreter path).
-GUEST_TESTS = tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/ports.com tests/loop.com
+GUEST_TESTS = tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/ports.com tests/loop.com tests/ed.com
 .PHONY: test-guest
 test-guest: $(TARGET) $(GUEST_TESTS)
 	@fail=0; \
@@ -79,6 +79,12 @@ test-guest: $(TARGET) $(GUEST_TESTS)
 	    out=$$(./$(TARGET) $$mode tests/ports.com 2>&1 | tr -d '\000'); \
 	    case "$$out" in *"PORT I/O OK"*) echo "ports.com $$mode: ok" ;; \
 	        *) echo "ports.com $$mode: FAIL"; fail=1 ;; esac; \
+	done; \
+	for mode in -i -j -V; do \
+	    out=$$(./$(TARGET) $$mode tests/ed.com 2>&1 | tr -d '\000'); \
+	    case "$$out" in *divergence*|*"lockstep broken"*) echo "ed.com $$mode: FAIL"; fail=1 ;; \
+	        *"ED OK"*) echo "ed.com $$mode: ok" ;; \
+	        *) echo "ed.com $$mode: FAIL"; fail=1 ;; esac; \
 	done; \
 	for t in hello block cb ix; do \
 	    out=$$(./$(TARGET) -V tests/$$t.com 2>&1 | tr -d '\000'); \
@@ -225,6 +231,13 @@ tests/ix.com: tools/mkix
 	./tools/mkix
 
 tools/mkix: tools/mkix.c
+	$(CC) -o $@ $<
+
+tests/ed.com: tools/mked
+	@mkdir -p tests
+	./tools/mked
+
+tools/mked: tools/mked.c
 	$(CC) -o $@ $<
 
 tests/console.com: tools/mkconsole
