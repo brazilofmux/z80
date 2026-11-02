@@ -71,7 +71,7 @@ test: test-video test-render test-kbd test-guest test-sort test-apps
 # Guest-side tests: the generated .COMs under the interpreter, the JIT,
 # and lockstep verify. ports.com is the Phase 0 acceptance test (every
 # port op traps, so all three modes exercise the same interpreter path).
-GUEST_TESTS = tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/ports.com tests/loop.com tests/ed.com
+GUEST_TESTS = tests/hello.com tests/block.com tests/cb.com tests/ix.com tests/ports.com tests/loop.com tests/ed.com tests/bdos.com
 .PHONY: test-guest
 test-guest: $(TARGET) $(GUEST_TESTS)
 	@fail=0; \
@@ -85,6 +85,15 @@ test-guest: $(TARGET) $(GUEST_TESTS)
 	    case "$$out" in *divergence*|*"lockstep broken"*) echo "ed.com $$mode: FAIL"; fail=1 ;; \
 	        *"ED OK"*) echo "ed.com $$mode: ok" ;; \
 	        *) echo "ed.com $$mode: FAIL"; fail=1 ;; esac; \
+	done; \
+	for mode in -i -j -V; do \
+	    rm -f tests/bdos.lst; \
+	    out=$$(./$(TARGET) $$mode --list tests/bdos.lst tests/bdos.com 2>&1 | tr -d '\000'); \
+	    lst=$$(cat tests/bdos.lst 2>/dev/null); rm -f tests/bdos.lst tests/BDOSTEST.TMP; \
+	    case "$$out" in *divergence*|*"lockstep broken"*) echo "bdos.com $$mode: FAIL"; fail=1 ;; \
+	        *"BDOS OK"*) if [ "$$lst" = LST ]; then echo "bdos.com $$mode: ok"; \
+	                     else echo "bdos.com $$mode: FAIL (LST: got '$$lst')"; fail=1; fi ;; \
+	        *) echo "bdos.com $$mode: FAIL"; fail=1 ;; esac; \
 	done; \
 	for t in hello block cb ix; do \
 	    out=$$(./$(TARGET) -V tests/$$t.com 2>&1 | tr -d '\000'); \
@@ -238,6 +247,13 @@ tests/ed.com: tools/mked
 	./tools/mked
 
 tools/mked: tools/mked.c
+	$(CC) -o $@ $<
+
+tests/bdos.com: tools/mkbdos
+	@mkdir -p tests
+	./tools/mkbdos
+
+tools/mkbdos: tools/mkbdos.c
 	$(CC) -o $@ $<
 
 tests/console.com: tools/mkconsole

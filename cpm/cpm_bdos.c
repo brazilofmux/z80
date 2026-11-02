@@ -7,6 +7,18 @@
 
 int cpm_debug = 0;
 
+/* CP/M returns 16-bit results in HL with A = L and B = H. */
+static void ret_hl(z80_cpu_t *cpu, uint16_t v) {
+    cpu->hl = v;
+    cpu->a = (uint8_t)v;
+    cpu->b = (uint8_t)(v >> 8);
+}
+
+/* The shim has one drive (A:, the host directory), one user area for
+ * every user number, and no physical devices behind RDR:/PUN:. */
+static uint16_t ro_vector;   /* BDOS 28/29/37: drives marked read-only */
+static uint8_t  user_code;   /* BDOS 32 */
+
 /* We will wire this into the interpreter's CALL handling.
  * For the DBT we will later make CALL 5 a fast path that exits the
  * translated block with a special "BDOS" exit reason.
@@ -82,6 +94,68 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
         }
         return 1;
 
+    case CPM_F_RDR:     /* 3 - reader input: no reader attached, read EOF */
+        cpu->a = 0x1A;
+        return 1;
+
+    case CPM_F_PUNCH:   /* 4 - punch output: discarded */
+        return 1;
+
+    case CPM_F_LIST:    /* 5 - list output to the --list file */
+        cpm_list_out(cpu->e);
+        return 1;
+
+    case CPM_F_GETIOB:  /* 7 - IOBYTE lives at 0003 */
+        cpu->a = cpu->mem[0x0003];
+        return 1;
+
+    case CPM_F_SETIOB:  /* 8 */
+        cpu->mem[0x0003] = cpu->e;
+        z80_mem_host_wrote(cpu, 0x0003, 1);
+        return 1;
+
+    case CPM_F_LOGINV:  /* 24 - only A: exists */
+        ret_hl(cpu, 0x0001);
+        return 1;
+
+    case CPM_F_GETALV:  /* 27 */
+        return cpm_bdos_alloc_vector(cpu);
+
+    case CPM_F_WRPROT:  /* 28 - current disk (always A:) */
+        ro_vector |= 0x0001;
+        cpu->a = 0;
+        return 1;
+
+    case CPM_F_GETROV:  /* 29 */
+        ret_hl(cpu, ro_vector);
+        return 1;
+
+    case CPM_F_SETATTR: /* 30 */
+        return cpm_bdos_set_attributes(cpu, cpu->de);
+
+    case CPM_F_GETDPB:  /* 31 */
+        ret_hl(cpu, CPM_SHIM_DPB);
+        return 1;
+
+    case CPM_F_USER:    /* 32 - E = FF: get; else set E & 0F */
+        if (cpu->e == 0xFF) cpu->a = user_code;
+        else { user_code = cpu->e & 0x0F; cpu->a = 0; }
+        return 1;
+
+    case CPM_F_FSIZE:   /* 35 */
+        return cpm_bdos_file_size(cpu, cpu->de);
+
+    case CPM_F_SETRAND: /* 36 */
+        return cpm_bdos_set_random(cpu, cpu->de);
+
+    case CPM_F_RESETDRV:/* 37 - DE = drives to reset: they lose R/O */
+        ro_vector &= (uint16_t)~cpu->de;
+        cpu->a = 0;
+        return 1;
+
+    case CPM_F_RANDWRZ: /* 40 - a host file past its end reads as zeros already */
+        return cpm_bdos_random_write(cpu, cpu->de);
+
     case CPM_F_CONSTAT: /* 11 - console status */
         cpu->a = cpm_constat();
         return 1;
@@ -90,7 +164,7 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
         cpu->a = cpm_conin();
         return 1;
 
-    case 6:             /* 6 - Direct Console I/O (very common) */
+    case CPM_F_DIRIO:   /* 6 - Direct Console I/O (very common) */
         /* CP/M dispatches on E only — D is ignored. The old check
          * `cpu->de == 0x00FF` required D==0, which Zork (and many other
          * programs) don't bother to clear. The result was that every
@@ -136,6 +210,7 @@ int cpm_bdos_dispatch(z80_cpu_t *cpu) {
          * the same FCB, and closing its files here produced its "E38
          * bad overlay file". */
         cpm_set_dma(CPM_DEFAULT_DMA);
+        ro_vector = 0;
         cpu->a = 0;
         return 1;
 

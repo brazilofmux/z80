@@ -194,7 +194,7 @@ static void usage(const char *prog) {
     printf("  -A IMG .. -P IMG    Mount disk images (tools/mkdsk, tools/diskdefs) and boot CP/M 2.2\n");
     printf("                      when no .COM is given: DRI's CCP+BDOS on our BIOS (cpm/cpm22/)\n");
     printf("  --system FILE       System image to boot (default: cpm/cpm22/system.bin next to the binary)\n");
-    printf("  --list FILE         Append LST: output to FILE (native CP/M only)\n");
+    printf("  --list FILE         Append LST: output to FILE\n");
     printf("  -h       This help\n\n");
     printf("Example:\n");
     printf("  %s tests/hello.com\n", prog);
@@ -296,6 +296,7 @@ int main(int argc, char **argv) {
      * relative --script path means what the shell meant. */
     kaypro_kbd_init();
     if (script && kaypro_kbd_script_load(script) != 0) return 1;
+    cpm_list_open(list_path);
 
     const char *root_to_use = disk_root ? disk_root : (effective_root[0] ? effective_root : NULL);
 
@@ -370,7 +371,7 @@ int main(int argc, char **argv) {
         for (int d = 0; d < 16; d++)
             if (drive_img[d] && cpm_host_mount(d, drive_img[d]) != 0) return 1;
         if (cpm_host_boot(&cpu, system_img) != 0) return 1;
-        cpm_host_install(&cpu, list_path);
+        cpm_host_install(&cpu);
     } else if (cpm_load_com(&cpu, final_prog) != 0) {
         fprintf(stderr, "Failed to load %s\n", final_prog);
         return 1;

@@ -48,7 +48,6 @@ static int      cur_drive = -1;
 static uint16_t cur_track, cur_sector, cur_dma;
 static uint8_t  last_result;
 static uint8_t  latch[256];
-static FILE    *list_fp;
 
 /* The system image (CCP+BDOS+BIOS) as loaded, for warm-boot reloads. */
 static uint8_t  *sys_image;
@@ -170,7 +169,7 @@ static void host_out(z80_cpu_t *cpu, uint8_t port, uint8_t high, uint8_t val) {
     latch[port] = val;
     switch (port) {
     case 0xE1: cpm_conout(val); break;
-    case 0xE2: if (list_fp) { fputc(val, list_fp); fflush(list_fp); } break;
+    case 0xE2: cpm_list_out(val); break;
     case 0xE3: break;                                         /* punch: dropped */
     case 0xE5:
         if (val == 0) reload_system(cpu);
@@ -194,12 +193,8 @@ static void host_out(z80_cpu_t *cpu, uint8_t port, uint8_t high, uint8_t val) {
     }
 }
 
-void cpm_host_install(z80_cpu_t *cpu, const char *list_path) {
+void cpm_host_install(z80_cpu_t *cpu) {
     memset(latch, 0xFF, sizeof latch);
-    if (list_path && *list_path) {
-        list_fp = fopen(list_path, "ab");
-        if (!list_fp) perror(list_path);
-    }
     cpu->port_in  = host_in;
     cpu->port_out = host_out;
     cpm_traps_enabled = 0;      /* the guest has a real BDOS and BIOS now */

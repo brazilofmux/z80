@@ -38,6 +38,15 @@ static uint8_t disk_io_buf[128];
 
 static void make_host_path(const char *name, char *out, size_t outlen);   /* forward decl */
 
+/* CP/M's OPEN gives a read/write handle; a host file without write
+ * permission (BDOS 30 R/O, or simply chmod 444) still opens, read-only,
+ * and a write through it fails the way a write to an R/O file should. */
+static FILE *open_rw_or_ro(const char *path) {
+    FILE *fp = fopen(path, "r+b");
+    if (!fp) fp = fopen(path, "rb");
+    return fp;
+}
+
 /* Drive A: root directory on the host.
  * If empty, we use the current working directory (original behavior).
  */
@@ -85,13 +94,14 @@ static void fcb_to_host_name(const uint8_t *fcb, char *host, size_t hostlen)
     char name[9], ext[4];
     int i;
 
-    /* Filename */
-    memcpy(name, fcb + 1, 8);
+    /* Filename. Bit 7 of each name byte is an attribute (t1' R/O,
+     * t2' SYS, f1'-f4' interface flags), never part of the name. */
+    for (i = 0; i < 8; i++) name[i] = (char)(fcb[1 + i] & 0x7F);
     name[8] = 0;
     for (i = 7; i >= 0 && name[i] == ' '; i--) name[i] = 0;
 
     /* Extension */
-    memcpy(ext, fcb + 9, 3);
+    for (i = 0; i < 3; i++) ext[i] = (char)(fcb[9 + i] & 0x7F);
     ext[3] = 0;
     for (i = 2; i >= 0 && ext[i] == ' '; i--) ext[i] = 0;
 
@@ -139,7 +149,7 @@ static int slot_for_io(z80_cpu_t *cpu, uint16_t fcb_addr)
     char host_name[64], full[PATH_MAX];
     fcb_to_host_name(fcb, host_name, sizeof(host_name));
     make_host_path(host_name, full, sizeof(full));
-    FILE *fp = fopen(full, "r+b");
+    FILE *fp = open_rw_or_ro(full);
     if (!fp) return -1;
     slot = alloc_file_slot();
     if (slot < 0) { fclose(fp); return -1; }
@@ -170,8 +180,9 @@ static int fcb_name_matches(const uint8_t *fcb, const char *host_name)
     char host_base[64], host_ext[16];
 
     /* Extract FCB pattern */
-    memcpy(fcb_name, fcb + 1, 8); fcb_name[8] = 0;
-    memcpy(fcb_ext,  fcb + 9, 3); fcb_ext[3] = 0;
+    for (int i = 0; i < 8; i++) fcb_name[i] = (char)(fcb[1 + i] & 0x7F);
+    for (int i = 0; i < 3; i++) fcb_ext[i]  = (char)(fcb[9 + i] & 0x7F);
+    fcb_name[8] = 0; fcb_ext[3] = 0;
 
     /* Split host filename */
     const char *dot = strrchr(host_name, '.');
@@ -247,7 +258,7 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
      * write through. Opening with plain "rb" worked for read-only
      * apps (games etc.) but breaks compilers that re-OPEN a file they
      * just MADE and then write into it (MS COBOL's "DISK FULL"). */
-    fp = fopen(host_name, "r+b");
+    fp = open_rw_or_ro(host_name);
     if (!fp) {
         cpu->a = 0xFF;   /* CP/M open failure */
         return 1;
@@ -602,6 +613,9 @@ static void fill_dir_entry(uint8_t *dest, const char *host_name, uint8_t drive)
     size_t elen = strlen(ext);
     for (int i = 0; i < 8; i++) dest[1+i] = (i < (int)blen) ? toupper(base[i]) : ' ';
     for (int i = 0; i < 3; i++) dest[9+i] = (i < (int)elen) ? toupper(ext[i])  : ' ';
+    /* t1': read-only. The mode bits, not access(): root may write anything. */
+    struct stat st;
+    if (stat(host_name, &st) == 0 && !(st.st_mode & 0222)) dest[9] |= 0x80;
 
     /* Fake some attributes / size so programs don't freak out */
     dest[12] = 0;   /* extent */
@@ -683,10 +697,115 @@ int cpm_bdos_search_next(z80_cpu_t *cpu)
 
 /* ------------------------------------------------------------------ */
 
+/* The shim's disk: 4K blocks (BSH 5, BLM 31), DSM 2047 -> 8 MB,
+ * EXM 1 (DSM > 255 means 16-bit block pointers: 8 x 4K = 32K, two
+ * logical extents, per directory entry), DRM 1023 with
+ * the directory in blocks 0-7 (AL0 FF), no checksum vector (fixed disk),
+ * no reserved tracks. SPT 64 is only there for programs that multiply. */
+#define SHIM_BLS      4096
+#define SHIM_DSM      2047
+#define SHIM_DIRBLKS  8
+
 void cpm_disk_install_defaults(z80_cpu_t *cpu)
 {
-    (void)cpu;
     current_dma = CPM_DEFAULT_DMA;
+    static const uint8_t dpb[15] = {
+        64, 0,                       /* SPT */
+        5, 31, 1,                    /* BSH BLM EXM */
+        SHIM_DSM & 0xFF, SHIM_DSM >> 8,
+        1023 & 0xFF, 1023 >> 8,      /* DRM */
+        0xFF, 0x00,                  /* AL0 AL1 */
+        0, 0,                        /* CKS */
+        0, 0,                        /* OFF */
+    };
+    memcpy(&cpu->mem[CPM_SHIM_DPB], dpb, sizeof dpb);
+    z80_mem_host_wrote(cpu, CPM_SHIM_DPB, sizeof dpb);
+}
+
+/* BDOS 27: the allocation vector, rebuilt from the host directory on
+ * every call so free-space figures (STAT, PIP, "disk full" checks) track
+ * what is really there: the directory blocks, then each regular file's
+ * size in 4K blocks. */
+int cpm_bdos_alloc_vector(z80_cpu_t *cpu)
+{
+    uint8_t alv[(SHIM_DSM + 1) / 8];
+    memset(alv, 0, sizeof alv);
+    uint32_t used = SHIM_DIRBLKS;
+    char dirpath[PATH_MAX];
+    make_host_path(".", dirpath, sizeof dirpath);
+    DIR *d = opendir(dirpath);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            char full[PATH_MAX];
+            struct stat st;
+            make_host_path(ent->d_name, full, sizeof full);
+            if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            used += (uint32_t)((st.st_size + SHIM_BLS - 1) / SHIM_BLS);
+        }
+        closedir(d);
+    }
+    if (used > SHIM_DSM + 1) used = SHIM_DSM + 1;
+    for (uint32_t b = 0; b < used; b++) alv[b >> 3] |= (uint8_t)(0x80 >> (b & 7));
+    memcpy(&cpu->mem[CPM_SHIM_ALV], alv, sizeof alv);
+    z80_mem_host_wrote(cpu, CPM_SHIM_ALV, sizeof alv);
+    cpu->hl = CPM_SHIM_ALV;
+    cpu->a = CPM_SHIM_ALV & 0xFF; cpu->b = CPM_SHIM_ALV >> 8;
+    return 1;
+}
+
+/* BDOS 30: t1' (bit 7 of the first extension byte) is R/O, which maps
+ * onto the host file's write permission; SYS and the interface bits
+ * have no host meaning and are accepted silently. A = 0 if the file
+ * exists, FF if not. */
+int cpm_bdos_set_attributes(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    const uint8_t *fcb = &cpu->mem[fcb_addr];
+    char name[64], full[PATH_MAX];
+    struct stat st;
+    fcb_to_host_name(fcb, name, sizeof name);
+    make_host_path(name, full, sizeof full);
+    if (!full[0] || stat(full, &st) != 0 || !S_ISREG(st.st_mode)) { cpu->a = 0xFF; return 1; }
+    mode_t m = st.st_mode & 07777;
+    mode_t want = (fcb[9] & 0x80) ? (m & ~(mode_t)0222) : (m | S_IWUSR);
+    if (want != m && chmod(full, want) != 0) { cpu->a = 0xFF; return 1; }
+    cpu->a = 0;
+    return 1;
+}
+
+/* BDOS 35: r0-r2 = the file's size in 128-byte records (the record
+ * just past the end, which is where an appending program writes). */
+int cpm_bdos_file_size(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    uint8_t *fcb = &cpu->mem[fcb_addr];
+    char name[64], full[PATH_MAX];
+    struct stat st;
+    uint32_t recs = 0;
+    fcb_to_host_name(fcb, name, sizeof name);
+    make_host_path(name, full, sizeof full);
+    int found = full[0] && stat(full, &st) == 0 && S_ISREG(st.st_mode);
+    if (found) recs = (uint32_t)((st.st_size + 127) / 128);
+    fcb[33] = (uint8_t)recs;
+    fcb[34] = (uint8_t)(recs >> 8);
+    fcb[35] = (uint8_t)(recs >> 16);
+    z80_mem_host_wrote(cpu, (uint16_t)(fcb_addr + 33), 3);
+    cpu->a = found ? 0 : 0xFF;
+    return 1;
+}
+
+/* BDOS 36: r0-r2 = the sequential position (extent, S2, CR), so a
+ * program can switch from sequential to random access in place. */
+int cpm_bdos_set_random(z80_cpu_t *cpu, uint16_t fcb_addr)
+{
+    uint8_t *fcb = &cpu->mem[fcb_addr];
+    uint32_t rec = fcb_record_pos(fcb);
+    fcb[33] = (uint8_t)rec;
+    fcb[34] = (uint8_t)(rec >> 8);
+    fcb[35] = 0;
+    z80_mem_host_wrote(cpu, (uint16_t)(fcb_addr + 33), 3);
+    cpu->a = 0;
+    return 1;
 }
 
 /* Set the host directory that will be used as CP/M drive A: */

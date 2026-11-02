@@ -112,6 +112,14 @@ int cpm_bios_dispatch(z80_cpu_t *cpu) {
         cpm_conout(cpu->c);
         return 1;
 
+    case BIOS_LIST:
+        cpm_list_out(cpu->c);
+        return 1;
+
+    case BIOS_LISTST:
+        cpu->a = 0xFF;                  /* the list device is always ready */
+        return 1;
+
     default:
         /* Stub for disk, list, etc. — return success so programs continue */
         return 1;
@@ -121,6 +129,20 @@ int cpm_bios_dispatch(z80_cpu_t *cpu) {
 /* ======================================================================
  * Real Console Implementation (used by both BDOS and BIOS)
  * ===================================================================== */
+
+/* LST: — appended to the --list file, flushed per byte so a crash or
+ * ^] loses nothing (printer output is slow by nature anyway). */
+static FILE *list_fp;
+
+void cpm_list_open(const char *path) {
+    if (!path || !*path) return;
+    list_fp = fopen(path, "ab");
+    if (!list_fp) perror(path);
+}
+
+void cpm_list_out(uint8_t ch) {
+    if (list_fp) { fputc(ch, list_fp); fflush(list_fp); }
+}
 
 /* CONOUT — write one character (used by BDOS 2 and BIOS CONOUT).
  * Output stays in stdio's buffer; we flush at the points where the

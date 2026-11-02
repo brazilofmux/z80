@@ -33,16 +33,18 @@
 /* Number of BIOS functions in the jump table (classic is 17 for CP/M 2.2) */
 #define CPM_BIOS_COUNT  17
 
-/* BDOS function numbers we care about for the first bring-up */
+/* BDOS function numbers (CP/M 2.2) */
 enum {
     CPM_F_WBOOT   = 0,   /* System reset */
-    CPM_F_CONIN   = 1,   /* Console input (wait) */
+    CPM_F_CONIN   = 1,   /* Console input (wait, echo) */
     CPM_F_CONOUT  = 2,   /* Console output (char in E) */
-    CPM_F_RDCON   = 3,
-    CPM_F_WRCON   = 4,
-    CPM_F_LIST    = 5,
-    CPM_F_PUNCH   = 6,
-    CPM_F_RDR     = 7,
+    CPM_F_RDR     = 3,   /* Reader input */
+    CPM_F_PUNCH   = 4,   /* Punch output (char in E) */
+    CPM_F_LIST    = 5,   /* List output (char in E) */
+    CPM_F_DIRIO   = 6,   /* Direct console I/O */
+    CPM_F_GETIOB  = 7,   /* Get IOBYTE */
+    CPM_F_SETIOB  = 8,   /* Set IOBYTE (E) */
+    CPM_F_PRINTSTR= 9,   /* Print $-terminated string at DE */
     CPM_F_RDSTR   = 10,  /* Read console buffer */
     CPM_F_CONSTAT = 11,  /* Console status */
     CPM_F_VERSION = 12,
@@ -57,21 +59,29 @@ enum {
     CPM_F_WRITE   = 21,
     CPM_F_MAKE    = 22,
     CPM_F_RENAME  = 23,
-    CPM_F_RETLOGIN= 24,
+    CPM_F_LOGINV  = 24,  /* Return login vector */
     CPM_F_RETDSK  = 25,
     CPM_F_SETDMA  = 26,
-    CPM_F_GETALLOC= 27,
-    CPM_F_WRPROT  = 28,
-    CPM_F_GETROV  = 29,
-    CPM_F_SETATTR = 30,
-    CPM_F_GETDPB  = 31,
+    CPM_F_GETALV  = 27,  /* Get allocation vector address */
+    CPM_F_WRPROT  = 28,  /* Write-protect the current disk */
+    CPM_F_GETROV  = 29,  /* Get R/O vector */
+    CPM_F_SETATTR = 30,  /* Set file attributes */
+    CPM_F_GETDPB  = 31,  /* Get disk parameter block address */
+    CPM_F_USER    = 32,  /* Get (E=FF) / set user code */
     CPM_F_RANDRD  = 33,
     CPM_F_RANDWR  = 34,
-    CPM_F_GETFSIZ = 35,
-    CPM_F_RANDWRZF= 36,
-    /* The big one for "hello world" */
-    CPM_F_PRINTSTR = 9,   /* Print $-terminated string at DE */
+    CPM_F_FSIZE   = 35,  /* Compute file size into r0-r2 */
+    CPM_F_SETRAND = 36,  /* Set random record from the sequential position */
+    CPM_F_RESETDRV= 37,  /* Reset drives in DE */
+    CPM_F_RANDWRZ = 40,  /* Write random with zero fill */
 };
+
+/* Shim-mode disk geometry (cpm_disk.c): the host directory is presented
+ * as an 8 MB disk, 4K blocks, 1024 directory entries. The DPB and the
+ * allocation vector live above the TPA, in the space a real BDOS would
+ * occupy (the shim has none there). */
+#define CPM_SHIM_DPB    0xE500   /* 15 bytes */
+#define CPM_SHIM_ALV    0xE510   /* (DSM+1)/8 = 256 bytes */
 
 /* BIOS function numbers (index into the jump table) */
 enum {
@@ -128,7 +138,7 @@ void cpm_install_ports(z80_cpu_t *cpu);
 extern int cpm_traps_enabled;
 int  cpm_host_mount(int drive, const char *path);      /* 0..15 = A..P; 0 ok */
 int  cpm_host_drive_type(int drive);                    /* 0 none, 1 floppy, 2 hard disk */
-void cpm_host_install(z80_cpu_t *cpu, const char *list_path);
+void cpm_host_install(z80_cpu_t *cpu);
 int  cpm_host_boot(z80_cpu_t *cpu, const char *system_path);
 
 /* BIOS support */
@@ -166,6 +176,18 @@ int  cpm_bdos_write_sequential(z80_cpu_t *cpu, uint16_t fcb_addr);
 /* Random record access (BDOS 33/34) */
 int  cpm_bdos_random_read(z80_cpu_t *cpu, uint16_t fcb_addr);
 int  cpm_bdos_random_write(z80_cpu_t *cpu, uint16_t fcb_addr);
+
+/* BDOS 27/30/35/36 and the shim DPB (installed by cpm_disk_install_defaults) */
+int  cpm_bdos_alloc_vector(z80_cpu_t *cpu);
+int  cpm_bdos_set_attributes(z80_cpu_t *cpu, uint16_t fcb_addr);
+int  cpm_bdos_file_size(z80_cpu_t *cpu, uint16_t fcb_addr);
+int  cpm_bdos_set_random(z80_cpu_t *cpu, uint16_t fcb_addr);
+
+/* LST: output, shared by the shim (BDOS 5, BIOS LIST) and native CP/M
+ * (port E2). Opened once by main, before it changes directory, so a
+ * relative --list path means what the shell meant. NULL/"" = discard. */
+void cpm_list_open(const char *path);
+void cpm_list_out(uint8_t ch);
 
 /* Load a .COM file at 0x0100, set up the CP/M memory image, and
  * prepare the CPU to run it (PC=0x0100, stack high, C=0 for CCP compat).
