@@ -47,6 +47,7 @@ tests/*.dSYM/
 tests/scripts/*.dump
 tests/scripts/*.err
 tests/kbd_test
+tests/disk_test
 tools/asl/
 cpm/cpm22/*.p
 cpm/cpm22/*.lst

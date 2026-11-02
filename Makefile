@@ -66,7 +66,7 @@ clean:
 	rm -f tools/mkhello tools/mkblock
 	rm -f tests/*.com tests/*.bin
 
-test: test-video test-render test-kbd test-guest test-sort test-apps
+test: test-video test-render test-kbd test-disk test-guest test-sort test-apps
 
 # Guest-side tests: the generated .COMs under the interpreter, the JIT,
 # and lockstep verify. ports.com is the Phase 0 acceptance test (every
@@ -127,6 +127,14 @@ test-kbd: tests/kbd_test
 
 # Host-side test of the terminal renderer (escape stream captured in memory).
 .PHONY: test-render
+# Host-side test of the shim disk layer with an explicit A: root that
+# is not the cwd (main.c never runs it that way).
+tests/disk_test: tests/disk_test.c cpm/cpm_disk.c cpm/cpm.h
+	$(CC) $(CFLAGS) -o $@ tests/disk_test.c cpm/cpm_disk.c
+.PHONY: test-disk
+test-disk: tests/disk_test
+	./tests/disk_test
+
 tests/render_test: tests/render_test.c kaypro/kaypro_render_tty.c kaypro/kaypro_video.c kaypro/kaypro_render_tty.h kaypro/kaypro_video.h
 	$(CC) $(CFLAGS) -o $@ tests/render_test.c kaypro/kaypro_render_tty.c kaypro/kaypro_video.c
 test-render: tests/render_test

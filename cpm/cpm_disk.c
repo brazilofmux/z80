@@ -227,7 +227,7 @@ static int fcb_name_matches(const uint8_t *fcb, const char *host_name)
 int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    char host_name[64];
+    char host_name[PATH_MAX];   /* the full host path */
     FILE *fp;
 
     /* If an existing slot owns this FCB, retire it first. MS COBOL (and
@@ -246,12 +246,10 @@ int cpm_bdos_open_file(z80_cpu_t *cpu, uint16_t fcb_addr)
         }
     }
 
-    fcb_to_host_name(fcb, host_name, sizeof(host_name));
     {
-        char full[PATH_MAX];
-        make_host_path(host_name, full, sizeof(full));
-        strncpy(host_name, full, sizeof(host_name));
-        host_name[sizeof(host_name)-1] = 0;
+        char name[16];
+        fcb_to_host_name(fcb, name, sizeof(name));
+        make_host_path(name, host_name, sizeof(host_name));
     }
 
     /* "r+b" — CP/M's OPEN returns a handle the program can read AND
@@ -499,7 +497,7 @@ int cpm_bdos_set_dma(z80_cpu_t *cpu)
 int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    char host_name[64];
+    char host_name[PATH_MAX];   /* the full host path */
     FILE *fp;
 
     /* Same FCB-reuse retirement as open_file. */
@@ -512,12 +510,10 @@ int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
         }
     }
 
-    fcb_to_host_name(fcb, host_name, sizeof(host_name));
     {
-        char full[PATH_MAX];
-        make_host_path(host_name, full, sizeof(full));
-        strncpy(host_name, full, sizeof(host_name));
-        host_name[sizeof(host_name)-1] = 0;
+        char name[16];
+        fcb_to_host_name(fcb, name, sizeof(name));
+        make_host_path(name, host_name, sizeof(host_name));
     }
 
     /* Create/truncate; allow subsequent reads too (CP/M doesn't
@@ -554,7 +550,7 @@ int cpm_bdos_make_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 int cpm_bdos_delete_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 {
     uint8_t *fcb = &cpu->mem[fcb_addr];
-    char host_name[64];
+    char host_name[PATH_MAX];   /* the full host path */
 
     /* If the file is currently open via this FCB, close it first. */
     {
@@ -566,12 +562,10 @@ int cpm_bdos_delete_file(z80_cpu_t *cpu, uint16_t fcb_addr)
         }
     }
 
-    fcb_to_host_name(fcb, host_name, sizeof(host_name));
     {
-        char full[PATH_MAX];
-        make_host_path(host_name, full, sizeof(full));
-        strncpy(host_name, full, sizeof(host_name));
-        host_name[sizeof(host_name)-1] = 0;
+        char name[16];
+        fcb_to_host_name(fcb, name, sizeof(name));
+        make_host_path(name, host_name, sizeof(host_name));
     }
 
     /* CP/M returns 0xFF when no file matched, 0..3 (directory code)
@@ -589,7 +583,7 @@ int cpm_bdos_delete_file(z80_cpu_t *cpu, uint16_t fcb_addr)
 /* Directory Search (BDOS 17 / 18)                                    */
 /* ------------------------------------------------------------------ */
 
-static void fill_dir_entry(uint8_t *dest, const char *host_name, uint8_t drive)
+static void fill_dir_entry(uint8_t *dest, const char *host_name, const char *full, uint8_t drive)
 {
     memset(dest, 0, 32);
     dest[0] = drive;                    /* drive code (0 = current) */
@@ -615,7 +609,7 @@ static void fill_dir_entry(uint8_t *dest, const char *host_name, uint8_t drive)
     for (int i = 0; i < 3; i++) dest[9+i] = (i < (int)elen) ? toupper(ext[i])  : ' ';
     /* t1': read-only. The mode bits, not access(): root may write anything. */
     struct stat st;
-    if (stat(host_name, &st) == 0 && !(st.st_mode & 0222)) dest[9] |= 0x80;
+    if (stat(full, &st) == 0 && !(st.st_mode & 0222)) dest[9] |= 0x80;
 
     /* Fake some attributes / size so programs don't freak out */
     dest[12] = 0;   /* extent */
@@ -652,10 +646,12 @@ int cpm_bdos_search_first(z80_cpu_t *cpu, uint16_t fcb_addr)
     while ((ent = readdir(search_dir)) != NULL) {
         if (ent->d_name[0] == '.') continue;           /* skip . and .. */
         struct stat st;
-        if (stat(ent->d_name, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        char full[PATH_MAX];
+        make_host_path(ent->d_name, full, sizeof full);
+        if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
 
         if (fcb_name_matches(fcb, ent->d_name)) {
-            fill_dir_entry(&cpu->mem[current_dma], ent->d_name, fcb[0]);
+            fill_dir_entry(&cpu->mem[current_dma], ent->d_name, full, fcb[0]);
             z80_mem_host_wrote(cpu, current_dma, 32);
             cpu->a = 0;
             return 1;
@@ -679,10 +675,12 @@ int cpm_bdos_search_next(z80_cpu_t *cpu)
     while ((ent = readdir(search_dir)) != NULL) {
         if (ent->d_name[0] == '.') continue;
         struct stat st;
-        if (stat(ent->d_name, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        char full[PATH_MAX];
+        make_host_path(ent->d_name, full, sizeof full);
+        if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
 
         if (fcb_name_matches(search_fcb, ent->d_name)) {
-            fill_dir_entry(&cpu->mem[current_dma], ent->d_name, search_fcb[0]);
+            fill_dir_entry(&cpu->mem[current_dma], ent->d_name, full, search_fcb[0]);
             z80_mem_host_wrote(cpu, current_dma, 32);
             cpu->a = 0;
             return 1;
